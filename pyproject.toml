@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xncagent"
+version = "0.1.0"
+description = "小喜子：戏精附体的赛博弄臣 Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "requests>=2.34.0",
+    "langchain==1.0.2",
+    "langchain-core==1.5.1",
+    "langchain-openai==1.4.1",
+    "langgraph==1.0.10",
+]
+
+[project.scripts]
+xncagent = "xncagent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["xncagent*"]
+
+[tool.setuptools.package-data]
+xncagent = ["prompts/*.md"]
