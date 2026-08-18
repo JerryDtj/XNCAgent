@@ -1,7 +1,19 @@
-python-dotenv>=1.0.0
-requests>=2.34.0
-PyYAML>=6.0
-langchain==1.0.2
-langchain-core==1.5.1
-langchain-openai==1.4.1
-langgraph==1.0.10
+# 核心深度学习依赖（版本锁定）
+torch==2.2.2
+transformers==4.41.2
+sentence-transformers==2.7.0
+numpy==1.26.4
+scipy==1.13.1
+
+# LlamaIndex 生态（统一版本，解决冲突）
+llama-index-core==0.11.0
+llama-index-embeddings-huggingface==0.3.0
+llama-index-vector-stores-chroma==0.3.0
+chromadb==0.5.20
+
+# 工具库
+python-dotenv==1.2.2
+pyyaml==6.0.1
+loguru==0.7.2
+tqdm==4.66.1
+psutil==5.9.8
