@@ -1,188 +1,259 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# @Time    : 2026/08/19 8:31:00
+# @Author  : Jerry
+# @File    : build_knowledge_base.py
+# @Description: 构建知识库:将 doc/话术/ 下的所有 .md 文件分块并存入 Chroma。仅需运行一次，后续更新知识库时重新运行即可。
 
+"""
+- 从 rag_config.yaml 和 configuration.yaml 读取配置
+- 功能拆分为独立函数（加载模型、加载文档、分块、入库等）
+- 2核4G适配,分批处理防止内存溢出 (batch_size=8)
+- 集中式日志管理（从 xncagent.utils.logger 导入）
+- 精简异常处理，统一由 main 捕获
+"""
+
+
+
+import datetime
 import os
-from pathlib import Path
 import sys
+import gc
+import time
+from pathlib import Path
 
-import chromadb
-from llama_index.core.indices import vector_store
-from llama_index.vector_stores.chroma import ChromaVectorStore
-
-from xncagent.utils import logger
-
-# 配置环境变量
+os.environ["HF_HOME"] = str(Path(__file__).parent.parent / "models/models")
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["HF_HOME"] = Config['rag']['embedding']['persist_path']
-
-
-from llama_index.core import Document, Settings, SimpleDirectoryReader, StorageContext, settings
-
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+os.environ["TOKENZERS_PARALLELISM"] = "false"
 
 from xncagent.config import Config
+from xncagent.utils.logger import logger
+
+from llama_index.core import SimpleDirectoryReader
+from llama_index.core.node_parser import SentenceSplitter
+
+import chromadb
+from chromadb.errors import InvalidCollectionException
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+from tqdm import tqdm
+
+vector_config = Config['rag']['vector_store']
+COLLECTION_NAME = vector_config.get('collection_name',"xiaoxizi_knowledge")
+DOCS_DIR = vector_config.get('docs_dir_abs',Path("doc/话术"))
+VECTOR_PERSIST_PATH = vector_config.get('persist_path_abs',Path("chroma_db"))
+
+embedding_config = Config['rag']['embedding']
+MODEL_NAME = embedding_config.get('model_name',"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+EMBEDDING_PERSIST_PATH = embedding_config.get('persist_path_abs',Path("models/embedding"))
+CHUNK_SIZE = embedding_config.get('chunk_size',512)
+CHUNK_OVERLAP = embedding_config.get('chunk_overlap',50)
+BATCH_SIZE = embedding_config.get('batch_size',8)
+
+logger_config = Config['system']['logger']
+LOG_LEVEL = logger_config.get('level',"INFO")
+LOG_FORMAT = logger_config.get('console_format',"<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
+LOG_FILE = logger_config.get('filename',"logs/xncagent.log")
+LOG_MAX_SIZE = logger_config.get('max_size',"10 MB")
 
 
 
-
-# 嵌入模型名称
-config_rag = Config['rag']['vector_store']
-DOCS_DIR = config_rag.get('docs_dir_abs')
-PERSIST_DIR = config_rag.get('persist_dir_abs')
-COLLECTION_NAME = config_rag.get('collection_name')
-
-config_embedding = Config['rag']['embedding']
-MODLE_NAME = config_embedding.get('model_name')
-CHUNK_SIZE = config_embedding.get('chunk_size')
-CHUNK_OVERLAP = config_embedding.get('chunk_overlap')
-BATCH_SIZE = config_embedding.get('batch_size')
-
-def init_embedding_model(model_name: str, batch_size: int):
-    """
-    初始化嵌入模型
-    Args:
-        model_name: 模型名称
-        batch_size: 批量大小
-    Returns:
-        embed_model: 嵌入模型对象
-    Raises:
-        Exception: 初始化嵌入模型失败
-    """
+def log_memory_usage():
+    """记录内存使用情况(MB)"""
     try:
-        logger.info(f"初始化嵌入模型{model_name}")
-        embed_model = HuggingFaceEmbedding(
-            model_name=model_name,
-            embed_batch_size=BATCH_SIZE,
-            device="cpu"
-        )
-        #快速失败,预热,自检模型是否可用
-        embed_model.aget_query_embedding(text="Hello, world!")
-        logger.info(f"嵌入模型{model_name}初始化成功")
-        return embed_model
+        import psutil
+        process = psutil.Process(os.getpid())
+        memory_usage = process.memory_info().rss / 1024 / 1024
+        logger.info(f"内存使用情况: {memory_usage:.2f} MB")
+        return memory_usage
+    except ImportError as e:
+        logger.error(f"导入psutil失败: {e}")
+        return None
     except Exception as e:
-        logger.error(f"初始化嵌入模型{model_name}失败: {e}")
-        sys.exit(1)
+        logger.error(f"记录内存使用情况失败: {e}")
+        return None
 
 
-def load_documents(docs_dir: str):
+def load_docs():
     """
-    加载文档
+    加载所有文档
     Args:
         docs_dir: 文档目录
     Returns:
-        documents: 文档列表
-    Raises:
-        Exception: 加载文档失败
+        docs: 文档列表
     """
-    try:
-        logger.info(f"加载文档,文档目录: {docs_dir}")
-        reader = SimpleDirectoryReader(
-            input_dir=docs_dir,
-            recursive=True,
-            required_exts=[".md", ".txt"],
-            encoding="utf-8",
-        )
-        documents = reader.load_data()
-        if len(documents) == 0:
-            logger.error(f"加载文档失败,文档目录: {docs_dir}")
-            sys.exit(0)
-        logger.info(f"加载文档成功,文档数量: {len(documents)}")
-        return documents
-    except Exception as e:
-        logger.error(f"加载文档失败: {e}")
-        sys.exit(1)
+    logger.info(f"开始从{DOCS_DIR}处加载文档: 递归加载所有 .md 文件")
 
+    if not DOCS_DIR.exists():
+        logger.error(f"文档目录不存在: {DOCS_DIR}")
+        raise FileNotFoundError(f"文档目录不存在: {DOCS_DIR}")
+    
+    reader = SimpleDirectoryReader(
+        input_dir=str(DOCS_DIR),
+        recursive=True,
+        required_exts=[".md"],
+        encoding="utf-8",
+    )
+    docs = reader.load_data()
+    if not docs:
+        logger.error(f"没有找到任何文档,请检查文档目录是否正确: {DOCS_DIR}")
+        return []
+    logger.info(f"加载完成,共加载 {len(docs)} 个文档")
+    log_memory_usage()
+    return docs
 
-def split_documents(documents: list[Document], chunk_size: int, chunk_overlap: int):
+def split_docs(docs: list):
     """
-    分割文档,生成节点块
+    对文档进行分块
     Args:
-        documents: 文档列表
+        docs: 文档列表
         chunk_size: 分块大小
         chunk_overlap: 分块重叠
     Returns:
-        nodes: 节点块列表
-    Raises:
-        Exception: 分割文档失败
+        nodes: 分块后的节点列表
     """
-    try:
-        logger.info(f"分割文档,文档数量: {len(documents)}, 分块大小: {chunk_size}, 分块重叠: {chunk_overlap}")
-        text_splitter = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        nodes = text_splitter.get_nodes_from_documents(documents)
-        logger.info(f"分割文档成功,共生成: {len(nodes)}个节点块")
-        return nodes
-    except Exception as e:
-        logger.error(f"分割文档失败: {e}")
-        sys.exit(1)
+    logger.info(f"开始对文档进行分块: 分块大小: {CHUNK_SIZE}, 重叠: {CHUNK_OVERLAP}")
+    splitter = SentenceSplitter(chunk_size=CHUNK_SIZE,chunk_overlap=CHUNK_OVERLAP)
+    nodes = splitter.get_nodes_from_documents(docs)
+    logger.info(f"分块完成,共分块 {len(nodes)} 个节点")
+    log_memory_usage()
+    return nodes
 
-def init_chroma_knowledge_base(collection_name: str,persist_path: Path):
+def _should_skip_confirmation():
     """
-    初始化Chroma知识库
+    检查是否需要跳过安全防护
+    """
+    return "--force" in sys.argv
+
+def _confirm_or_exit(message: str):
+    """
+    确认或退出
+    """
+    if _should_skip_confirmation():
+        logger.info("🔓 强制模式已启用（--force），跳过交互确认")
+        return
+
+    #  非交互式终端 -> 直接过,走保底备份删除逻辑
+    # 交互式终端 -> 用户确认
+    logger.warning("=" * 50)
+    logger.warning("⚠️  即将删除现有 Collection 并完全重建！")
+    logger.warning(f"目标持久化目录: {VECTOR_PERSIST_PATH}")
+    logger.warning(f"目标 Collection: {COLLECTION_NAME}")
+    logger.warning("=" * 50)
+    confirm = input("请输入 'YES' 确认执行（其他任意字符取消）: ")
+    if confirm.lower() != "yes":
+        logger.info("用户取消操作")
+        sys.exit(0)
+    
+def init_chroma_db():
+    """
+    初始化向量数据库chroma:如果集合已存在,则走阻塞流程,确认后重命名集合,并创建新集合,不存在直接创建
     Args:
-        collection_name: 知识库名称
-        persist_path: 持久化路径
+        collection_name: 集合名称
     Returns:
-        chroma_client: Chroma知识库客户端对象
-    Raises:
-        Exception: 初始化Chroma知识库失败
+        chroma_db: 向量数据库
     """
-    logger.info(f"初始化Chroma知识库,知识库名称: {collection_name}")
-    try:
-        persist_path.mkdir(parents=True, exist_ok=True)
-        chroma_client = chromadb.PersistentClient(path=str(persist_path))
-        try:
-            chroma_client.delete_collection(collection_name=collection_name)
-            logger.info(f"已删除旧知识库: {collection_name}")
-        except Exception as e:
-            pass
-        chroma_collection = chroma_client.get_or_create_collection(name=collection_name)
-        logger.info(f"初始化Chroma知识库成功,知识库名称: {collection_name}")
-        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        return vector_store,storage_context
-        
-    except Exception as e:
-        logger.error(f"初始化Chroma知识库失败: {e}")
-        sys.exit(1)
+    logger.info(f"开始初始化向量数据库chroma: 集合名称: {COLLECTION_NAME}")
+    VECTOR_PERSIST_PATH.mkdir(parents=True,exist_ok=True)
+    client = chromadb.PersistentClient(path=str(VECTOR_PERSIST_PATH))
 
+    try:
+        collection = client.get_collection(name=COLLECTION_NAME)
+        logger.info(f"集合 {COLLECTION_NAME} 已存在,走阻塞流程")
+        _confirm_or_exit(f"集合 {COLLECTION_NAME} 已存在,是否继续？")
+        new_collection_name = f"{COLLECTION_NAME}_backup_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        collection.modify(name=new_collection_name)
+        logger.info(f"集合 {COLLECTION_NAME} 已重命名为 {new_collection_name}")
+    except InvalidCollectionException:
+        logger.info(f"集合 {COLLECTION_NAME} 不存在,将创建新集合")
+    
+    # 使用 normalize_embeddings=True 确保向量归一化
+    enbedding_fn = SentenceTransformerEmbeddingFunction(model_name=MODEL_NAME, device="cpu", normalize_embeddings=True)
+    collection = client.create_collection(
+        name=str(COLLECTION_NAME),
+        embedding_function=enbedding_fn,
+        metadata={
+            "description": "xnc_agent 话术知识库",
+            "embedding_model": MODEL_NAME,
+            "chunk_size": CHUNK_SIZE,
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+    )
+    logger.info(f"集合 {COLLECTION_NAME} 创建成功")
+    logger.info(f"向量数据库chroma初始化完成")
+    log_memory_usage()
+    return collection
+
+def insert_chunks(nodes: list,collection ):
+    """
+    插入分块
+    Args:
+        nodes: 分块后的节点列表
+        collection: 集合
+        model: 嵌入模型
+        batch_size: 批次大小
+    Returns:
+        insert_count: 插入数量
+    """
+    total = len(nodes)
+    logger.info(f"开始插入分块: 节点数量: {total}")
+    if not nodes or total == 0:
+        logger.error(f"没有找到任何节点,请检查文档是否正确: {DOCS_DIR}")
+        return 0
+    insert_count = 0
+    with tqdm(nodes,desc="插入分块",total=total) as pbar:
+        for i in range(0,total,BATCH_SIZE):
+            batch_nodes = nodes[i:i+BATCH_SIZE]
+            try:
+                collection.add(
+                    documents = [n.text for n in batch_nodes],
+                    ids = [n.node_id for n in batch_nodes],
+                    metadatas = [n.metadata for n in batch_nodes],
+                )
+                insert_count += len(batch_nodes)
+                pbar.update(len(batch_nodes))
+            except Exception as e:
+                logger.error(f"插入分块失败: {e}")
+                continue
+    return insert_count
 
 def main():
-    """
-    构建知识库脚本
-    """
+    start_time = time.time()
+    logger.info("=" * 50)
+    logger.info("知识库构建启动")
+    log_memory_usage()
 
-    # 1.初始化本地小模型
-    Settings.embed_model = init_embedding_model(MODLE_NAME, BATCH_SIZE)
-    # 2.加载文档
-    documents = load_documents(str(DOCS_DIR))
-    # 3.初始化文本分割器
-    Settings.text_splitter = split_documents(documents, CHUNK_SIZE, CHUNK_OVERLAP)
-    # 4.Chroma 知识库初始化
+    try:
+        # 1.加载所有文档
+        docs = load_docs()
+        # 2.对文档进行分块
+        nodes = split_docs(docs)
+        # 3.初始化向量数据库chroma
+        collection = init_chroma_db()
+        # 4.按照2核4G的配置，批量嵌入和存储
+        insert_count = insert_chunks(nodes,collection)
+        # 5.释放资源
+        gc.collect()
+        Spend_time = time.time() - start_time
+        logger.info("=" * 50)
+        logger.info(f"构建知识库完成，耗时: {Spend_time:.2f}秒")
+        logger.info(f"文档目录: {DOCS_DIR}")
+        logger.info(f"embedding持久化目录: {EMBEDDING_PERSIST_PATH}")
+        logger.info(f"分块大小: {CHUNK_SIZE}, 重叠: {CHUNK_OVERLAP}")
+        logger.info(f"批次大小: {BATCH_SIZE}")
+        logger.info(f"chroma持久化目录: {VECTOR_PERSIST_PATH}")
+        logger.info(f"Collection: {COLLECTION_NAME}")
+        logger.info(f"嵌入模型: {MODEL_NAME}")
+        logger.info("=" * 50)
 
-    # 5.添加文档到知识库
-
-    # 6.清理
-
-    init_embedding_model(MODLE_NAME, BATCH_SIZE)
-
-    Settings.embed_model = HuggingFaceEmbedding(
-        model_name=MODLE_NAME,
-        embed_batch_size=BATCH_SIZE,
-        device="cpu"
-    )
-
-
-    settings.text_spltter = SentenceSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP
-    )
-
-    if not os.path.exists(DOCS_DIR):
-        print(f"文档目录{DOCS_DIR}不存在，请检查配置文件")
-        return
+    except KeyboardInterrupt:
+        logger.error(f"构建知识库中断")
+        exit(0)
+    except Exception as e:
+        logger.error(f"构建知识库失败: {e}")
+        exit(1)
     
-    
-
-    
+   
 
 if __name__ == "__main__":
     main()

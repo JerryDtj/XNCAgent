@@ -9,6 +9,7 @@ scipy==1.13.1
 llama-index-core==0.11.0
 llama-index-embeddings-huggingface==0.3.0
 llama-index-vector-stores-chroma==0.3.0
+llama-index-readers-file==0.2.2
 chromadb==0.5.20
 
 # 工具库
@@ -17,3 +18,8 @@ pyyaml==6.0.1
 loguru==0.7.2
 tqdm==4.66.1
 psutil==5.9.8
+
+# 测试框架
+pytest==8.2.2
+pytest-cov==5.0.0   # 可选，用于测试覆盖率统计
+pytest-xdist==3.6.1 # 可选，并行运行测试加速

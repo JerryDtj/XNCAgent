@@ -1,15 +1,15 @@
 vector_store:
-  # 向量数据库的集合名称
+  # 向量数据库(chroma)的集合名称
   collection_name: "xiaoxizi_knowledge"
   # 文档目录
   docs_dir: "doc/话术"
-  # 向量目录
-  persist_dir: "chroma_db"
+  # 模型持久化路径
+  persist_path: "models/chroma"
 embedding:
   # 嵌入模型名称,更快可以换可以换 "BAAI/bge-large-zh-v1.5"，但需要至少8G内存
   model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  # 模型持久化路径
-  persist_path: "moddles/"
+  # embedding持久化路径
+  persist_path: "models/embedding"
   # 分块大小
   chunk_size: 512
   # 分块重叠
