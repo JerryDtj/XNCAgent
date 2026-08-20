@@ -30,7 +30,6 @@ system_config = load_config('configuration.yaml')
 # 将相对路径转为绝对路径（供脚本和运行时使用）
 rag_config["vector_store"]["docs_dir_abs"] = _project_dir / rag_config["vector_store"]["docs_dir"]
 rag_config["vector_store"]["persist_path_abs"] = _project_dir / rag_config["vector_store"]["persist_path"]
-rag_config["embedding"]["persist_path_abs"] = _project_dir / rag_config["embedding"]["persist_path"]
 
 
 # 合并配置,方便后续使用

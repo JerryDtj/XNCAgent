@@ -14,7 +14,7 @@
 """
 
 
-
+import psutil
 import datetime
 import os
 import sys
@@ -29,12 +29,18 @@ os.environ["TOKENZERS_PARALLELISM"] = "false"
 from xncagent.config import Config
 from xncagent.utils.logger import logger
 
-from llama_index.core import SimpleDirectoryReader
+from llama_index.core import (
+    VectorStoreIndex,
+    StorageContext,
+    Settings,
+    SimpleDirectoryReader,
+)
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 import chromadb
 from chromadb.errors import InvalidCollectionException
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 from tqdm import tqdm
 
@@ -45,7 +51,6 @@ VECTOR_PERSIST_PATH = vector_config.get('persist_path_abs',Path("chroma_db"))
 
 embedding_config = Config['rag']['embedding']
 MODEL_NAME = embedding_config.get('model_name',"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-EMBEDDING_PERSIST_PATH = embedding_config.get('persist_path_abs',Path("models/embedding"))
 CHUNK_SIZE = embedding_config.get('chunk_size',512)
 CHUNK_OVERLAP = embedding_config.get('chunk_overlap',50)
 BATCH_SIZE = embedding_config.get('batch_size',8)
@@ -57,188 +62,180 @@ LOG_FILE = logger_config.get('filename',"logs/xncagent.log")
 LOG_MAX_SIZE = logger_config.get('max_size',"10 MB")
 
 
+_enbed_model = None
+_chroma_client = None
 
-def log_memory_usage():
-    """记录内存使用情况(MB)"""
+def _init_embedding_model() -> HuggingFaceEmbedding:
+    """
+    初始化嵌入模型
+    :return: 嵌入模型
+    """
+    global _enbed_model
+    if _enbed_model is None:
+        _enbed_model = HuggingFaceEmbedding(
+            model_name=MODEL_NAME,
+            device= "cpu",
+        )
+        Settings.embed_model = _enbed_model
+        logger.info(f"嵌入模型初始化完成: {MODEL_NAME}")
+        return _enbed_model
+
+def _init_chroma_client() -> chromadb.Client:
+    """
+    初始化Chroma客户端
+    :return: Chroma客户端
+    """
+    global _chroma_client
+    if _chroma_client is None:
+        VECTOR_PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+        _chroma_client = chromadb.PersistentClient(path=str(VECTOR_PERSIST_PATH))
+        logger.info(f"Chroma客户端初始化完成: {VECTOR_PERSIST_PATH}")
+    return _chroma_client
+
+def log_memory_usage() -> float | None:
     try:
-        import psutil
         process = psutil.Process(os.getpid())
-        memory_usage = process.memory_info().rss / 1024 / 1024
-        logger.info(f"内存使用情况: {memory_usage:.2f} MB")
-        return memory_usage
-    except ImportError as e:
-        logger.error(f"导入psutil失败: {e}")
-        return None
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        logger.info(f"内存使用: {memory_mb:.2f} MB")
+        return memory_mb
     except Exception as e:
-        logger.error(f"记录内存使用情况失败: {e}")
+        logger.warning(f"内存监控失败: {e}")
         return None
 
-
-def load_docs():
+def load_docs() -> list:
     """
     加载所有文档
-    Args:
-        docs_dir: 文档目录
-    Returns:
-        docs: 文档列表
+    :param docs_dir: 文档目录
+    :return: 文档列表
     """
-    logger.info(f"开始从{DOCS_DIR}处加载文档: 递归加载所有 .md 文件")
-
     if not DOCS_DIR.exists():
         logger.error(f"文档目录不存在: {DOCS_DIR}")
         raise FileNotFoundError(f"文档目录不存在: {DOCS_DIR}")
-    
+
     reader = SimpleDirectoryReader(
         input_dir=str(DOCS_DIR),
-        recursive=True,
         required_exts=[".md"],
+        recursive=True,
         encoding="utf-8",
     )
     docs = reader.load_data()
-    if not docs:
-        logger.error(f"没有找到任何文档,请检查文档目录是否正确: {DOCS_DIR}")
-        return []
-    logger.info(f"加载完成,共加载 {len(docs)} 个文档")
+    logger.info(f"加载完成, 共 {len(docs)} 个文档")
     log_memory_usage()
+    if not docs:
+        logger.error(f"文档目录下没有文档: {DOCS_DIR}")
+        raise FileNotFoundError(f"文档目录下没有文档: {DOCS_DIR}")
     return docs
 
-def split_docs(docs: list):
+def split_docs(docs: list) -> list:
     """
     对文档进行分块
-    Args:
-        docs: 文档列表
-        chunk_size: 分块大小
-        chunk_overlap: 分块重叠
-    Returns:
-        nodes: 分块后的节点列表
+    :param docs: 文档列表
+    :return: 分块后的节点列表
     """
-    logger.info(f"开始对文档进行分块: 分块大小: {CHUNK_SIZE}, 重叠: {CHUNK_OVERLAP}")
-    splitter = SentenceSplitter(chunk_size=CHUNK_SIZE,chunk_overlap=CHUNK_OVERLAP)
+    logger.info(f"开始分块: size={CHUNK_SIZE}, chunk_overlap = {CHUNK_OVERLAP}")
+    splitter = SentenceSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+    )
     nodes = splitter.get_nodes_from_documents(docs)
-    logger.info(f"分块完成,共分块 {len(nodes)} 个节点")
+    logger.info(f"文档分块完成，分块数量: {len(nodes)}")
     log_memory_usage()
     return nodes
 
-def _should_skip_confirmation():
-    """
-    检查是否需要跳过安全防护
-    """
-    return "--force" in sys.argv
 
-def _confirm_or_exit(message: str):
+def _backup_existing_collection(client):
     """
-    确认或退出
+    备份已存在的集合
+    :param client: Chroma客户端
+    :return: None
     """
-    if _should_skip_confirmation():
-        logger.info("🔓 强制模式已启用（--force），跳过交互确认")
-        return
-
-    #  非交互式终端 -> 直接过,走保底备份删除逻辑
-    # 交互式终端 -> 用户确认
-    logger.warning("=" * 50)
-    logger.warning("⚠️  即将删除现有 Collection 并完全重建！")
-    logger.warning(f"目标持久化目录: {VECTOR_PERSIST_PATH}")
-    logger.warning(f"目标 Collection: {COLLECTION_NAME}")
-    logger.warning("=" * 50)
-    confirm = input("请输入 'YES' 确认执行（其他任意字符取消）: ")
-    if confirm.lower() != "yes":
-        logger.info("用户取消操作")
-        sys.exit(0)
-    
-def init_chroma_db():
-    """
-    初始化向量数据库chroma:如果集合已存在,则走阻塞流程,确认后重命名集合,并创建新集合,不存在直接创建
-    Args:
-        collection_name: 集合名称
-    Returns:
-        chroma_db: 向量数据库
-    """
-    logger.info(f"开始初始化向量数据库chroma: 集合名称: {COLLECTION_NAME}")
-    VECTOR_PERSIST_PATH.mkdir(parents=True,exist_ok=True)
-    client = chromadb.PersistentClient(path=str(VECTOR_PERSIST_PATH))
-
     try:
-        collection = client.get_collection(name=COLLECTION_NAME)
-        logger.info(f"集合 {COLLECTION_NAME} 已存在,走阻塞流程")
-        _confirm_or_exit(f"集合 {COLLECTION_NAME} 已存在,是否继续？")
-        new_collection_name = f"{COLLECTION_NAME}_backup_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
-        collection.modify(name=new_collection_name)
-        logger.info(f"集合 {COLLECTION_NAME} 已重命名为 {new_collection_name}")
-    except InvalidCollectionException:
-        logger.info(f"集合 {COLLECTION_NAME} 不存在,将创建新集合")
-    
-    # 使用 normalize_embeddings=True 确保向量归一化
-    enbedding_fn = SentenceTransformerEmbeddingFunction(model_name=MODEL_NAME, device="cpu", normalize_embeddings=True)
+        connection = client.get_collection(name=COLLECTION_NAME)
+        logger.info(f"集合: {COLLECTION_NAME}已存在")   
+        if '--force' not in sys.argv:
+            confrim = input(f"请输入 'YES' 确认重建: ")
+            if confrim != 'YES':
+                logger.info(f"用户取消重建")
+                exit(0)
+        new_name = f"{COLLECTION_NAME}_backup_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        connection.modify(name=new_name)
+        logger.info(f"已备份为: {new_name}")
+    except InvalidCollectionException as e:
+        logger.info(f"集合 {COLLECTION_NAME} 不存在, 将创建新集合")
+
+def init_chroma_store():
+    """
+    初始化Chroma向量存储
+    :return: Chroma向量存储
+    """
+    client = _init_chroma_client()
+    _backup_existing_collection(client)
+
     collection = client.create_collection(
-        name=str(COLLECTION_NAME),
-        embedding_function=enbedding_fn,
+        name=COLLECTION_NAME,
         metadata={
             "description": "xnc_agent 话术知识库",
             "embedding_model": MODEL_NAME,
             "chunk_size": CHUNK_SIZE,
             "created_at": datetime.datetime.now().isoformat(),
-        }
+        },
     )
-    logger.info(f"集合 {COLLECTION_NAME} 创建成功")
-    logger.info(f"向量数据库chroma初始化完成")
-    log_memory_usage()
-    return collection
+    logger.info(f"集合: {COLLECTION_NAME} 创建完成")
+    return ChromaVectorStore(chroma_collection=collection)
 
-def insert_chunks(nodes: list,collection ):
+def build_index(nodes: list, vector_store: ChromaVectorStore) -> VectorStoreIndex:
     """
-    插入分块
-    Args:
-        nodes: 分块后的节点列表
-        collection: 集合
-        model: 嵌入模型
-        batch_size: 批次大小
-    Returns:
-        insert_count: 插入数量
+    构建向量索引
+    :param nodes: 节点列表
+    :param vector_store: 向量存储
+    :return: 向量索引
     """
-    total = len(nodes)
-    logger.info(f"开始插入分块: 节点数量: {total}")
-    if not nodes or total == 0:
-        logger.error(f"没有找到任何节点,请检查文档是否正确: {DOCS_DIR}")
-        return 0
-    insert_count = 0
-    with tqdm(nodes,desc="插入分块",total=total) as pbar:
-        for i in range(0,total,BATCH_SIZE):
-            batch_nodes = nodes[i:i+BATCH_SIZE]
-            try:
-                collection.add(
-                    documents = [n.text for n in batch_nodes],
-                    ids = [n.node_id for n in batch_nodes],
-                    metadatas = [n.metadata for n in batch_nodes],
-                )
-                insert_count += len(batch_nodes)
-                pbar.update(len(batch_nodes))
-            except Exception as e:
-                logger.error(f"插入分块失败: {e}")
-                continue
-    return insert_count
+    _init_embedding_model()
+
+    logger.info(f"开始构建向量索引")
+    index = VectorStoreIndex(
+        nodes=nodes,
+        storage_context=StorageContext.from_defaults(vector_store=vector_store),
+        show_progress=True,
+    )
+    logger.info(f"构建完成, 共 {len(index.docstore.docs)} 个节点")
+    log_memory_usage()
+    return index
+
+def get_index() -> VectorStoreIndex:
+    """
+    获取向量索引
+    :return: 向量索引
+    """
+    _init_embedding_model()
+
+    client = _init_chroma_client()
+    connection = client.get_collection(name=COLLECTION_NAME)
+    vector_store = ChromaVectorStore(chroma_collection=connection)
+    log_memory_usage()
+    return VectorStoreIndex.from_vector_store(vector_store=vector_store)
+
 
 def main():
     start_time = time.time()
     logger.info("=" * 50)
     logger.info("知识库构建启动")
-    log_memory_usage()
-
     try:
         # 1.加载所有文档
         docs = load_docs()
         # 2.对文档进行分块
         nodes = split_docs(docs)
         # 3.初始化向量数据库chroma
-        collection = init_chroma_db()
+        vector_store = init_chroma_store()
         # 4.按照2核4G的配置，批量嵌入和存储
-        insert_count = insert_chunks(nodes,collection)
+        index = build_index(nodes,vector_store)
         # 5.释放资源
         gc.collect()
+
         Spend_time = time.time() - start_time
         logger.info("=" * 50)
         logger.info(f"构建知识库完成，耗时: {Spend_time:.2f}秒")
         logger.info(f"文档目录: {DOCS_DIR}")
-        logger.info(f"embedding持久化目录: {EMBEDDING_PERSIST_PATH}")
         logger.info(f"分块大小: {CHUNK_SIZE}, 重叠: {CHUNK_OVERLAP}")
         logger.info(f"批次大小: {BATCH_SIZE}")
         logger.info(f"chroma持久化目录: {VECTOR_PERSIST_PATH}")

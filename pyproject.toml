@@ -8,10 +8,25 @@ version = "0.1.0"
 description = "小喜子：戏精附体的赛博弄臣 Agent"
 readme = "README.md"
 requires-python = ">=3.10"
-dynamic = ["dependencies"]
-
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+dependencies = [
+    "transformers==4.41.2",
+    "sentence-transformers==2.7.0",
+    "numpy==1.26.4",
+    "scipy==1.13.1",
+    "llama-index-core==0.11.0",
+    "llama-index-embeddings-huggingface==0.3.0",
+    "llama-index-vector-stores-chroma==0.3.0",
+    "llama-index-readers-file==0.2.2",
+    "chromadb==0.5.20",
+    "python-dotenv==1.2.2",
+    "pyyaml==6.0.1",
+    "loguru==0.7.2",
+    "tqdm==4.66.1",
+    "psutil==5.9.8",
+    "pytest==8.2.2",
+    "pytest-cov==5.0.0",
+    "pytest-xdist==3.6.1",
+]
 
 [project.scripts]
 xncagent = "xncagent.cli:main"
@@ -21,3 +36,8 @@ include = ["xncagent","xncagent.*"]
 
 [tool.setuptools.package-data]
 xncagent = ["config/**/*"]
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'"
+]

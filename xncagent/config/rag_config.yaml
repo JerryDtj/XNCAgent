@@ -8,8 +8,6 @@ vector_store:
 embedding:
   # 嵌入模型名称,更快可以换可以换 "BAAI/bge-large-zh-v1.5"，但需要至少8G内存
   model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  # embedding持久化路径
-  persist_path: "models/embedding"
   # 分块大小
   chunk_size: 512
   # 分块重叠
