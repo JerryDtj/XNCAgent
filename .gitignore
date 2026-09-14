@@ -22,3 +22,7 @@ htmlcov/
 
 logs/
 models/
+
+# 求职口径、简历、个人联系方式，不进 GitHub
+doc/私人/
+
