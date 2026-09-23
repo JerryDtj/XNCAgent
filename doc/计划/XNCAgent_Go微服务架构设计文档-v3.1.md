@@ -160,7 +160,7 @@
 
 | 服务名 | 职责 | 端口 | 数据库 | 缓存 |
 |--------|------|------|--------|------|
-| Gateway | 路由、鉴权、限流、Feature Flag、A/B 分流、日志 | 8080 | - | Redis |
+| Gateway | 路由、鉴权、限流、Feature Flag、A/B 分流、日志 | 8199 | - | Redis |
 | User Service | 注册、登录、JWT 签发、用户信息管理 | 50051(gRPC) | PostgreSQL | Redis |
 | Member Service | 好友度计算、等级管理、权益查询 | 50052(gRPC) | PostgreSQL | Redis |
 | Commercial Service | 积分账户、充值、预扣、结算、对账、降级开关 | 50053(gRPC) | PostgreSQL | Redis |
@@ -1644,13 +1644,13 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 8080
+            port: 8199
           initialDelaySeconds: 10
           periodSeconds: 30
         readinessProbe:
           httpGet:
             path: /ready
-            port: 8080
+            port: 8199
           initialDelaySeconds: 5
           periodSeconds: 10
 ```
