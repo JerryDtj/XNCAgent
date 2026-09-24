@@ -68,7 +68,7 @@ Week C (10.08-10.12): OTel、compose、文档与代码对齐
 | Sandbox | tool 走超时子进程（timeout 5s，超限 kill） | 死循环类调用被终止 |
 | Go 环境 | 在 `XNCAgent-go`：Go 1.23+、`cmd/gateway`、`cmd/user`、现成 compose | `go build ./...` 通过；`deploy/docker-compose.yaml` 起 Postgres/Redis（Kafka/Jaeger 已在文件中） |
 | Gateway | Gin、`/health`、统一 JSON、RequestID | `curl /health` 返回标准 JSON |
-| User | 注册/登录、bcrypt、JWT access+refresh | 注册→登录→带 token 访问受保护接口 |
+| User | 邮箱验证码登录（未注册自动建号）、JWT access+refresh | 发码→登录→带 token 访问受保护接口 |
 
 **周验收（9.21）**：Agent 不稳则本周继续修，活动核销推到链路稳定之后（仍属一期）。
 

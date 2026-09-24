@@ -161,7 +161,7 @@
 | 服务名 | 职责 | 端口 | 数据库 | 缓存 |
 |--------|------|------|--------|------|
 | Gateway | 路由、鉴权、限流、Feature Flag、A/B 分流、日志 | 8199 | - | Redis |
-| User Service | 注册、登录、JWT 签发、用户信息管理 | 50051(gRPC) | PostgreSQL | Redis |
+| User Service | 邮箱验证码登录（未注册自动建号）、JWT 签发、用户信息管理 | 50051(gRPC) | PostgreSQL | Redis |
 | Member Service | 好友度计算、等级管理、权益查询 | 50052(gRPC) | PostgreSQL | Redis |
 | Commercial Service | 积分账户、充值、预扣、结算、对账、降级开关 | 50053(gRPC) | PostgreSQL | Redis |
 | Commercial-worker | 消费 balance_events，按用户合并净额批量落库 | - | PostgreSQL | - |
@@ -175,7 +175,7 @@
 
 ```
 Gateway
-+-- User Service（同步，登录/注册）
++-- User Service（同步，邮箱验证码登录）
 +-- Member Service（同步，查询等级）
 +-- Commercial Service（同步，充值/余额/预扣结算；内部读写 Redis + 发 Kafka）
 +-- Promotion Service（同步，活动 preview / 充值核销）
@@ -258,8 +258,7 @@ func FeatureFlagMiddleware() gin.HandlerFunc {
 
 ### 5.1 核心功能
 
-- 用户注册（邮箱/手机号）
-- 用户登录（密码 + JWT 签发）
+- 用户登录（一期：邮箱验证码；未注册自动建号。二期/三期可切短信验证码，phone 列已预留）
 - Token 刷新（Refresh Token 机制）
 - 用户信息查询（gRPC 供其他服务调用）
 
