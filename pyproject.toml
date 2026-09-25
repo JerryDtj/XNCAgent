@@ -27,10 +27,15 @@ dependencies = [
     "pytest-cov==5.0.0",
     "pytest-xdist==3.6.1",
     "fastapi[standard]>=0.141.1",
+    "openai>=3.19.2",
 ]
 
 [project.scripts]
 xncagent = "xncagent.cli:main"
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+default = true
 
 [tool.setuptools.packages.find]
 include = ["xncagent","xncagent.*"]

@@ -1,14 +1,11 @@
-import os
-from pathlib import Path
-from dotenv import load_dotenv
-
-from xncagent.utils.exceptions import NotFoundException
 
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
+def get_history_by_user_id(user_id: str) -> str:
+    """
+    获取用户历史对话
+    :param user_id: 用户ID
+    :return: 历史对话
+    """
+    # 这里先写个空函数，回头在补齐这个函数
+    return ""
 
-BASE_URL = os.getenv("AGICTOR_BASE_URL","https://api.agicto.cn/v1")
-API_KEY = os.getenv("AGICTOR_API_KEY")
-if not API_KEY:
-    raise NotFoundException(message="api key 未配置")
