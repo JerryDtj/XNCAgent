@@ -14,7 +14,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sys.path.insert(0, str(ROOT_DIR))
 
 
-from script.build_knowledge_base import get_index
+from xncagent.rag.index_store import get_index
 from llama_index.core.schema import NodeWithScore
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 

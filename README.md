@@ -77,13 +77,10 @@ XNCAgent 是「小喜子」的专属 Agent 项目：一名戏精附体的赛博�
 
 ## 环境准备
 
-需要 Python 3.10+。
+需要 Python 3.10–3.12，以及 [uv](https://docs.astral.sh/uv/)。
 
 ```bash
-cd /Users/dengtianjiao/PycharmProjects/XNCAgent
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 ```
 
 复制环境变量模板并填写密钥（不要把 `.env` 提交到 GitHub）：
@@ -100,39 +97,33 @@ cp .env.example .env
 ## 运行
 
 ```bash
-python main.py
+uv run start
 ```
 
-或：
+等价于 `uv run python -m xncagent`。入口是 `xncagent/__main__.py`，用 uvicorn 拉起 FastAPI，监听 `http://127.0.0.1:8000`（开发模式会自动重载）。
 
-```bash
-python -m xncagent
-```
-
-输入问题后会流式打印回复。输入「朕累了」结束对话。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| POST | `/agent/chat` | 对话，JSON body：`{"message": "..."}` |
+| POST | `/agent/chat/stream` | 同上，SSE 流式回复 |
 
 ## 项目结构
 
 ```
 XNCAgent/
-├── main.py                          # 启动入口
 ├── xncagent/
-│   ├── agent.py                     # LangChain Agent 组装与流式输出
-│   ├── cli.py                       # 命令行对话循环
-│   ├── dialect.py                   # 按 IP 推断方言
-│   ├── tools.py                     # 笑话等工具
-│   └── prompts/
-│       └── 小奴才系统提示词.md       # 系统提示词（含 {language} 占位）
-├── docs/                            # 情绪雷达对应的场景话术
-│   ├── 起床赖床.md
-│   ├── 职场吐槽.md
-│   ├── 安慰话术.md
-│   └── 捧哏金句.md
+│   ├── __main__.py                  # 启动入口：组装 FastAPI 并用 uvicorn 监听 :8000
+│   ├── agent/                       # 对话主流程
+│   ├── route/                       # /agent/chat、/agent/chat/stream
+│   ├── config/                      # 提示词与场景配置
+│   ├── llm/                         # 模型调用
+│   ├── rag/                         # 知识库检索
+│   └── utils/
+├── doc/                             # 场景话术、架构与计划
 ├── .env.example
-├── .gitignore
-├── .gitattributes
-├── pyproject.toml
-└── requirements.txt
+├── pyproject.toml                   # 脚本入口 start = xncagent.__main__:main
+└── uv.lock
 ```
 
 ## 推送到 GitHub

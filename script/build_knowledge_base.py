@@ -28,35 +28,31 @@ os.environ["TOKENZERS_PARALLELISM"] = "false"
 
 from xncagent.config import Config
 from xncagent.utils.logger import logger
-from xncagent.utils.chromadb_import import disable_overrides_type_hint_check
-# Chroma 0.5 在定义接口时会用 @override 核对方法签名，核对类型注解时会在 Python 3.11 上无限递归，所以直接把 overrides.signature._get_type_hints 换成一个直接返回 None 的函数
-disable_overrides_type_hint_check()
+from xncagent.rag.index_store import (
+    BATCH_SIZE,
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    COLLECTION_NAME,
+    MODEL_NAME,
+    VECTOR_PERSIST_PATH,
+    _init_chroma_client,
+    init_embedding_model,
+)
 
 from llama_index.core import (
     VectorStoreIndex,
     StorageContext,
-    Settings,
     SimpleDirectoryReader,
 )
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-import chromadb
 from chromadb.errors import InvalidCollectionException
 
 from tqdm import tqdm
 
 vector_config = Config['rag']['vector_store']
-COLLECTION_NAME = vector_config.get('collection_name',"xiaoxizi_knowledge")
 DOCS_DIR = vector_config.get('docs_dir_abs',Path("doc/话术"))
-VECTOR_PERSIST_PATH = vector_config.get('persist_path_abs',Path("chroma_db"))
-
-embedding_config = Config['rag']['embedding']
-MODEL_NAME = embedding_config.get('model_name',"BAAI/bge-small-zh-v1.5")
-CHUNK_SIZE = embedding_config.get('chunk_size',512)
-CHUNK_OVERLAP = embedding_config.get('chunk_overlap',50)
-BATCH_SIZE = embedding_config.get('batch_size',8)
 
 logger_config = Config['system']['logger']
 LOG_LEVEL = logger_config.get('level',"INFO")
@@ -64,36 +60,6 @@ LOG_FORMAT = logger_config.get('console_format',"<green>{time:YYYY-MM-DD HH:mm:s
 LOG_FILE = logger_config.get('filename',"logs/xncagent.log")
 LOG_MAX_SIZE = logger_config.get('max_size',"10 MB")
 
-
-_enbed_model = None
-_chroma_client = None
-
-def _init_embedding_model() -> HuggingFaceEmbedding:
-    """
-    初始化嵌入模型
-    :return: 嵌入模型
-    """
-    global _enbed_model
-    if _enbed_model is None:
-        _enbed_model = HuggingFaceEmbedding(
-            model_name=MODEL_NAME,
-            device= "cpu",
-        )
-        Settings.embed_model = _enbed_model
-        logger.info(f"嵌入模型初始化完成: {MODEL_NAME}")
-        return _enbed_model
-
-def _init_chroma_client() -> chromadb.Client:
-    """
-    初始化Chroma客户端
-    :return: Chroma客户端
-    """
-    global _chroma_client
-    if _chroma_client is None:
-        VECTOR_PERSIST_PATH.mkdir(parents=True, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(path=str(VECTOR_PERSIST_PATH))
-        logger.info(f"Chroma客户端初始化完成: {VECTOR_PERSIST_PATH}")
-    return _chroma_client
 
 def log_memory_usage() -> float | None:
     try:
@@ -193,7 +159,7 @@ def build_index(nodes: list, vector_store: ChromaVectorStore) -> VectorStoreInde
     :param vector_store: 向量存储
     :return: 向量索引
     """
-    _init_embedding_model()
+    init_embedding_model()
 
     logger.info(f"开始构建向量索引")
     index = VectorStoreIndex(
@@ -204,20 +170,6 @@ def build_index(nodes: list, vector_store: ChromaVectorStore) -> VectorStoreInde
     logger.info(f"构建完成, 共 {len(index.docstore.docs)} 个节点")
     log_memory_usage()
     return index
-
-def get_index() -> VectorStoreIndex:
-    """
-    获取向量索引
-    :return: 向量索引
-    """
-    _init_embedding_model()
-
-    client = _init_chroma_client()
-    connection = client.get_collection(name=COLLECTION_NAME)
-    vector_store = ChromaVectorStore(chroma_collection=connection)
-    log_memory_usage()
-    return VectorStoreIndex.from_vector_store(vector_store=vector_store)
-
 
 def main():
     start_time = time.time()

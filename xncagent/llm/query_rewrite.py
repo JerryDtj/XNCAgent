@@ -1,15 +1,40 @@
+import json
 from functools import lru_cache
 
 from openai import OpenAI
-from xncagent.utils.exceptions import BizException
-from xncagent.schemas.query_rewrite import RewriterQuestionResponse
-from xncagent.llm.config import settings, BASE_DIR
+from pydantic import ValidationError
+
+from xncagent.config.prompts import load_system_prompt
+from xncagent.llm.config import settings
 from xncagent.scene_matcher import load_rag_whitelist
-from pathlib import Path
-import yaml
+from xncagent.schemas.query_rewrite import RewriterQuestionResponse
+from xncagent.utils.exceptions import BizException
+from xncagent.utils.logger import logger
 
 # RAG 检索白名单：5 个场景（不含兜底"无关闲聊"），与 scene_desc.yaml 一处定义
 SCENE_WHITELIST = list(load_rag_whitelist())
+
+
+def _load_json_object(content: str) -> dict:
+    """从模型原文里取出第一个 JSON 对象。提示词已要求只回 JSON，这里兼容外层说明和代码块。"""
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    start = text.find("{")
+    if start < 0:
+        raise BizException("LLM 未返回 JSON")
+    try:
+        data, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError as exc:
+        raise BizException("LLM 返回的 JSON 无法解析") from exc
+    if not isinstance(data, dict):
+        raise BizException("LLM 返回的 JSON 不是对象")
+    return data
 
 @lru_cache(maxsize=1)
 def _get_client() -> OpenAI:
@@ -19,13 +44,7 @@ def _get_client() -> OpenAI:
     不在模块导入时初始化：没有 API Key 的环境（如本地跑评测、降级通道演练）
     也能 import 本模块，只有真正调用 LLM 时才要求凭证。
     """
-    return OpenAI(api_key=settings.require_api_key(), base_url=settings.agictor_base_url)
-
-@lru_cache(maxsize=1)
-def load_system_prompt() -> str:
-    raw = Path(BASE_DIR / "prompts" / "query_rewrite.yaml").read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
-    return data["system_prompt"].strip()
+    return OpenAI(api_key=settings.require_api_key(), base_url=settings.agictor_base_url)   
 
 def query_rewrite(query: str, history: str = "") -> RewriterQuestionResponse:
     """
@@ -41,20 +60,21 @@ def query_rewrite(query: str, history: str = "") -> RewriterQuestionResponse:
     }
     调用失败抛异常，由调用方兜底（返回兜底话术 + 记日志）。
     """
-    completion = _get_client().chat.completions.parse(
-        model=settings.model_name,
+    logger.info(f"[LLM] 发往服务商 model={settings.check_model_name} stream=False")
+    completion = _get_client().chat.completions.create(
+        model=settings.check_model_name,
         messages=[
-            {"role": "system","content": load_system_prompt()},
+            {"role": "system", "content": load_system_prompt("understand_query")},
             {
                 "role": "user",
-                "content": f"## 历史对话\n{history}\n\n## 用户输入\n{query}"
-            }
+                "content": f"## 历史对话\n{history}\n\n## 用户输入\n{query}",
+            },
         ],
-        response_format=RewriterQuestionResponse,
         temperature=0.0,
     )
-    result = completion.choices[0].message.parsed
-    if result is None:
-        raise BizException("LLM调用失败，result为空")
-    return result
+    content = completion.choices[0].message.content or ""
+    try:
+        return RewriterQuestionResponse.model_validate(_load_json_object(content))
+    except ValidationError as exc:
+        raise BizException("LLM 返回的字段不符合约定") from exc
   

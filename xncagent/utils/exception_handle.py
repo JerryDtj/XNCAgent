@@ -1,25 +1,22 @@
-from fastapi import Request
+from fastapi import FastAPI, Request
 from xncagent.utils.logger import logger
-from fastapi.responses import JSONResponse
-from fastapi import FastAPI
 from xncagent.utils.response import fail
-from typing import Optional
-from exceptions import NotFoundException, BadRequestException, UnauthorizedException, BizException
+from xncagent.utils.exceptions import NotFoundException, BadRequestException, UnauthorizedException, BizException
 
 
-async def hand_not_found_exception(exc: NotFoundException,request: Optional[Request] = None):
+async def hand_not_found_exception(request: Request, exc: NotFoundException):
     logger.error(f"资源未找到: {exc.message}")
     return fail(NotFoundException.code, message=exc.message, request=request)
 
-async def hand_bad_request_exception(exc: BadRequestException,request: Optional[Request] = None):
+async def hand_bad_request_exception(request: Request, exc: BadRequestException):
     logger.error(f"请求参数错误: {request.url} {exc.message}")
     return fail(http_code=400, code=BadRequestException.code, message=exc.message, request=request)
 
-async def hand_unauthorized_exception(exc: UnauthorizedException,request: Optional[Request] = None):
+async def hand_unauthorized_exception(request: Request, exc: UnauthorizedException):
     logger.error(f"未授权: {request.url} {exc.message}")
     return fail(http_code=401, code=UnauthorizedException.code, message=exc.message, request=request)
 
-async def hand_biz_exception(exc: BizException,request: Optional[Request] = None):
+async def hand_biz_exception(request: Request, exc: BizException):
     logger.error(f"业务处理失败: {exc.message}")
     return fail(http_code=509, code=BizException.code, message=exc.message, request=request)
 

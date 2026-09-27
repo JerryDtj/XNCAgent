@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [project.scripts]
-xncagent = "xncagent.cli:main"
+start = "xncagent.__main__:main"
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
@@ -53,4 +53,4 @@ required-environments = [
 ]
 
 [tool.fastapi]
-entrypoint = "xncagent.webclient:app"
+entrypoint = "xncagent.__main__:app"
