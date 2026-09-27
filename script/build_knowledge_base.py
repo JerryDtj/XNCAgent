@@ -28,6 +28,9 @@ os.environ["TOKENZERS_PARALLELISM"] = "false"
 
 from xncagent.config import Config
 from xncagent.utils.logger import logger
+from xncagent.utils.chromadb_import import disable_overrides_type_hint_check
+# Chroma 0.5 在定义接口时会用 @override 核对方法签名，核对类型注解时会在 Python 3.11 上无限递归，所以直接把 overrides.signature._get_type_hints 换成一个直接返回 None 的函数
+disable_overrides_type_hint_check()
 
 from llama_index.core import (
     VectorStoreIndex,
