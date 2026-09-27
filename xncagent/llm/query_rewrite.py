@@ -4,10 +4,22 @@ from openai import OpenAI
 from xncagent.utils.exceptions import BizException
 from xncagent.schemas.query_rewrite import RewriterQuestionResponse
 from xncagent.llm.config import settings, BASE_DIR
+from xncagent.scene_matcher import load_rag_whitelist
 from pathlib import Path
 import yaml
 
-_client = OpenAI(api_key=settings.agictor_api_key,base_url=settings.agictor_base_url,)
+# RAG 检索白名单：5 个场景（不含兜底"无关闲聊"），与 scene_desc.yaml 一处定义
+SCENE_WHITELIST = list(load_rag_whitelist())
+
+@lru_cache(maxsize=1)
+def _get_client() -> OpenAI:
+    """
+    惰性创建 OpenAI 客户端。
+
+    不在模块导入时初始化：没有 API Key 的环境（如本地跑评测、降级通道演练）
+    也能 import 本模块，只有真正调用 LLM 时才要求凭证。
+    """
+    return OpenAI(api_key=settings.require_api_key(), base_url=settings.agictor_base_url)
 
 @lru_cache(maxsize=1)
 def load_system_prompt() -> str:
@@ -15,8 +27,7 @@ def load_system_prompt() -> str:
     data = yaml.safe_load(raw)
     return data["system_prompt"].strip()
 
-SCENE_WHITELIST = ["挨骂兜底", "安慰话术", "懒懒不想动", "捧哏金句", "职场吐槽"]
-def rewrite_query(query: str, history: str = "") -> RewriterQuestionResponse:
+def query_rewrite(query: str, history: str = "") -> RewriterQuestionResponse:
     """
     一次 LLM 调用，同时完成改写与场景识别。
 
@@ -30,7 +41,7 @@ def rewrite_query(query: str, history: str = "") -> RewriterQuestionResponse:
     }
     调用失败抛异常，由调用方兜底（返回兜底话术 + 记日志）。
     """
-    completion = _client.chat.completions.parse(
+    completion = _get_client().chat.completions.parse(
         model=settings.model_name,
         messages=[
             {"role": "system","content": load_system_prompt()},
@@ -45,5 +56,5 @@ def rewrite_query(query: str, history: str = "") -> RewriterQuestionResponse:
     result = completion.choices[0].message.parsed
     if result is None:
         raise BizException("LLM调用失败，result为空")
-    return RewriterQuestionResponse.model_validate_json(result)
+    return result
   

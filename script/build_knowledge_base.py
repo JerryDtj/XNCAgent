@@ -50,7 +50,7 @@ DOCS_DIR = vector_config.get('docs_dir_abs',Path("doc/话术"))
 VECTOR_PERSIST_PATH = vector_config.get('persist_path_abs',Path("chroma_db"))
 
 embedding_config = Config['rag']['embedding']
-MODEL_NAME = embedding_config.get('model_name',"sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+MODEL_NAME = embedding_config.get('model_name',"BAAI/bge-small-zh-v1.5")
 CHUNK_SIZE = embedding_config.get('chunk_size',512)
 CHUNK_OVERLAP = embedding_config.get('chunk_overlap',50)
 BATCH_SIZE = embedding_config.get('batch_size',8)

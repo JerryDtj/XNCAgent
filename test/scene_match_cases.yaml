@@ -1,0 +1,242 @@
+# 场景匹配评测集
+#
+# 用法:
+#   python test/scene_match_eval.py                          # 默认 bge-small-zh-v1.5 + 配置阈值
+#   python test/scene_match_eval.py --model shibing624/text2vec-base-chinese
+#   python test/scene_match_eval.py --threshold 0.40         # 调参对比
+#
+# 规模目标: ≥ 50 条。当前为初始种子集（36 条），随运营迭代持续补充，
+# 补充时保持 category 分类不变，报告里的分组指标才有纵向可比性。
+#
+# 填写约定:
+#   query     用户原始输入，不要改写
+#   expected  字符串 = 唯一期望场景；列表 = 复合意图，命中其一即算对
+#   category  分组维度，报告按此统计：
+#               hit_<场景>   明确场景输入，期望命中
+#               fallback     闲聊/低信息量输入，期望低于阈值落进无关闲聊
+#               compound     复合意图（同时属于多个场景）
+#               edge_slang   网络新词 / 口语缩写
+#               edge_short   极短输入
+#               edge_other   反问、转述等其他边界形态
+#   note      争议样本的备注，复盘用（可选）
+
+cases:
+  # ---------- hit_挨骂兜底（主人吐槽小喜子本人） ----------
+  - query: 小喜子，你怎么这么贱
+    expected: 挨骂兜底
+    category: hit_挨骂兜底
+  - query: 闭嘴吧你，烦死了
+    expected: 挨骂兜底
+    category: hit_挨骂兜底
+  - query: 你这个奴才，真想打你一顿
+    expected: 挨骂兜底
+    category: hit_挨骂兜底
+  - query: 小喜子你太让我失望了
+    expected: 挨骂兜底
+    category: hit_挨骂兜底
+
+  # ---------- hit_安慰话术 ----------
+  - query: 我失恋了，心里好难受
+    expected: 安慰话术
+    category: hit_安慰话术
+  - query: 求安慰，今天好丧
+    expected: 安慰话术
+    category: hit_安慰话术
+  - query: 我是不是太敏感了
+    expected: 安慰话术
+    category: hit_安慰话术
+  - query: 感觉人生好失败，什么都不顺
+    expected: 安慰话术
+    category: hit_安慰话术
+  - query: 今天被朋友误会了，心里堵得慌
+    expected: 安慰话术
+    category: hit_安慰话术
+
+  # ---------- hit_懒懒不想动 ----------
+  - query: 唉，不想起床
+    expected: 懒懒不想动
+    category: hit_懒懒不想动
+  - query: 今天只想躺着，什么也不干
+    expected: 懒懒不想动
+    category: hit_懒懒不想动
+  - query: 好困，一动不想动
+    expected: 懒懒不想动
+    category: hit_懒懒不想动
+  - query: 周末睡到中午才起，太舒服了
+    expected: 懒懒不想动
+    category: hit_懒懒不想动
+
+  # ---------- hit_捧哏金句 ----------
+  - query: 笑死，你再多说点，我爱听
+    expected: 捧哏金句
+    category: hit_捧哏金句
+  - query: 给我讲个笑话呗
+    expected: 捧哏金句
+    category: hit_捧哏金句
+  - query: 你这嘴也太贫了，哈哈
+    expected: 捧哏金句
+    category: hit_捧哏金句
+  - query: 你一开口我就想笑，太能贫了
+    expected: 捧哏金句
+    category: hit_捧哏金句
+  - query: 哈哈哈，你这嘴咋这么贫呢
+    expected: 捧哏金句
+    category: hit_捧哏金句
+  - query: 哎哟喂，你这嘴皮子真溜，哈哈哈
+    expected: 捧哏金句
+    category: hit_捧哏金句
+  
+
+  # ---------- hit_职场吐槽 ----------
+  - query: 明天又要上班了，烦
+    expected: 职场吐槽
+    category: hit_职场吐槽
+  - query: 今天被老板骂了，好难受
+    expected: 职场吐槽
+    category: hit_职场吐槽
+    note: 挨骂兜底仅限吐槽小喜子本人，被老板骂归这里
+  - query: 开个会开了三个小时，人都麻了
+    expected: 职场吐槽
+    category: hit_职场吐槽
+  - query: 甲方又改需求了，真的无语
+    expected: 职场吐槽
+    category: hit_职场吐槽
+
+  # ---------- compound（复合意图，命中其一即算对） ----------
+  - query: 上班好累，不想起床
+    expected: [职场吐槽, 懒懒不想动]
+    category: compound
+  - query: 又被老板骂了，好emo
+    expected: [职场吐槽, 安慰话术]
+    category: compound
+  - query: 周末过得好快，明天又要上班了
+    expected: [懒懒不想动, 职场吐槽]
+    category: compound
+
+  # ---------- fallback（低信息量，期望被阈值兜进无关闲聊） ----------
+  - query: 今天天气真不错啊
+    expected: 无关闲聊
+    category: fallback
+  - query: 今天几号了
+    expected: 无关闲聊
+    category: fallback
+  - query: 中午吃啥
+    expected: 无关闲聊
+    category: fallback
+  - query: 在干嘛呢
+    expected: 无关闲聊
+    category: fallback
+  - query: 好无聊啊
+    expected: 无关闲聊
+    category: fallback
+  - query: 你吃饭了吗
+    expected: 无关闲聊
+    category: fallback
+  - query: 我刚路过一家新开的火锅店，排了好长的队
+    expected: 无关闲聊
+    category: fallback
+  - query: 在吗
+    expected: 无关闲聊
+    category: fallback
+  - query: 哈哈哈
+    expected: 捧哏金句
+    category: hit_捧哏金句
+    note: 纯笑声走捧哏（2026-09-26 议题 2 决议，对齐 doc/场景定义/ 判例）
+  - query: 笑死我了
+    expected: 捧哏金句
+    category: hit_捧哏金句
+    note: 同上
+
+  # ---------- edge_slang（网络新词） ----------
+  - query: emo了
+    expected: 安慰话术
+    category: edge_slang
+  - query: 破防了
+    expected: 安慰话术
+    category: edge_slang
+  - query: 今天好丧
+    expected: 安慰话术
+    category: edge_slang
+  - query: 完了，芭比Q了
+    expected: 捧哏金句
+    category: edge_slang
+    note: 芭比Q是"完蛋了"自嘲搞笑梗，复核修正（2026-09-26）
+  - query: 今天真是社死现场
+    expected: 安慰话术
+    category: edge_slang
+  - query: 我直接栓Q了
+    expected: 无关闲聊
+    category: edge_slang
+    note: 栓Q=无语吐槽谐音梗，无难过情绪，复核修正（2026-09-26）
+  - query: 别卷了，我想摆烂
+    expected: [职场吐槽, 懒懒不想动]
+    category: edge_slang
+    note: 卷/摆烂无明确工作对象，复核修正为复合意图（2026-09-26）
+  - query: 尊嘟假嘟，你别骗我
+    expected: 无关闲聊
+    category: edge_slang
+  - query: 这操作也太泰裤辣
+    expected: 无关闲聊
+    category: edge_slang
+  - query: 你个老六，我真服了
+    expected: 挨骂兜底
+    category: edge_slang
+    note: 话锋对着小喜子，按优先级表归挨骂兜底，复核修正（2026-09-26）
+  - query: 纯纯的显眼包
+    expected: 无关闲聊
+    category: edge_slang
+    note: 无工作锚点，纯调侃，复核修正（2026-09-26）
+  - query: 找个搭子一起吃饭
+    expected: 无关闲聊
+    category: edge_slang
+  - query: 已老实，求放过
+    expected: 捧哏金句
+    category: edge_slang
+    note: 认怂梗，调侃性质，复核修正（2026-09-26）
+
+  # ---------- edge_short（极短输入） ----------
+  - query: 嗯
+    expected: 无关闲聊
+    category: edge_short
+    note: 单字无信息量，只能兜底
+  - query: 哦
+    expected: 无关闲聊
+    category: edge_short
+    note: 单字语气词，无信息量，无明确意图，只能兜底为无关闲聊
+  - query: 额
+    expected: 无关闲聊
+    category: edge_short
+    note: 单字停顿词，无明确诉求，无法进入具体分类
+  - query: 唔
+    expected: 无关闲聊
+    category: edge_short
+    note: 单字拟声/语气词，无上下文，无法判断意图
+  - query: 哈？
+    expected: 无关闲聊
+    category: edge_short
+    note: 极短疑问语气，无明确问题对象，只能按无关闲聊处理
+  - query: 对
+    expected: 无关闲聊
+    category: edge_short
+    note: 单字确认，无上下文，无法判断具体意图
+  - query: 好嘞
+    expected: 无关闲聊
+    category: edge_short
+    note: 极短语气应答，无信息量，只能兜底
+  - query: 哦豁
+    expected: 无关闲聊
+    category: edge_short
+    note: 极短感叹词，无具体诉求，无法进入具体分类
+  - query: 累
+    expected: [安慰话术, 懒懒不想动]
+    category: edge_short
+    note: 单字歧义大，两个场景都接受
+
+  # ---------- edge_other（反问 / 转述） ----------
+  - query: 难道我连难过的资格都没有吗
+    expected: 安慰话术
+    category: edge_other
+  - query: 我同事说他天天加班到半夜
+    expected: 职场吐槽
+    category: edge_other
+    note: 转述他人经历，场景仍在职场，但不应触发情绪预警（树洞双保险口径）

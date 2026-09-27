@@ -28,6 +28,7 @@ dependencies = [
     "pytest-xdist==3.6.1",
     "fastapi[standard]>=0.141.1",
     "openai>=3.19.2",
+    "hf-transfer>=0.1.9",
 ]
 
 [project.scripts]

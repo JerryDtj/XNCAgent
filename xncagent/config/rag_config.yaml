@@ -7,7 +7,8 @@ vector_store:
   persist_path: "models/chroma"
 embedding:
   # 嵌入模型名称,更快可以换可以换 "BAAI/bge-large-zh-v1.5"，但需要至少8G内存
-  model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  # 2026-09-26 决议(议题3): 知识库与场景匹配统一用 bge-small-zh-v1.5，512维，换模型需重建库
+  model_name: "BAAI/bge-small-zh-v1.5"
   # 分块大小
   chunk_size: 512
   # 分块重叠
