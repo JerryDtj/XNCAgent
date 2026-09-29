@@ -11,34 +11,7 @@ from xncagent.utils.logger import logger
 # 服务商返回负载过高时的重试间隔：第 1/2/3 次重试前分别等待 2s、4s、8s。
 _LOAD_BACKOFF_SECONDS = (2, 4, 8)
 
-# 进程内最近对话。记忆层（Redis / PostgreSQL）接入前，多轮历史只活在当前进程。
-_histories: dict[str, list[dict[str, str]]] = {}
-_HISTORY_TURNS = 5
 _client: AsyncOpenAI | None = None
-
-def get_history_by_user_id(user_id: str) -> str:
-    """
-    获取用户最近对话，拼成纯文本供改写和生成使用。
-    :param user_id: 用户ID
-    :return: 历史对话
-    """
-    turns = _histories.get(user_id, [])[-_HISTORY_TURNS * 2 :]
-    lines = []
-    for message in turns:
-        role = "主人" if message["role"] == "user" else "小喜子"
-        lines.append(f"{role}: {message['content']}")
-    return "\n".join(lines)
-
-def save_history(user_id: str, query: str, answer: str) -> None:
-    """
-    记下这一轮问答。
-    :param user_id: 用户ID
-    :param query: 用户输入
-    :param answer: 小喜子回复
-    """
-    turns = _histories.setdefault(user_id, [])
-    turns.append({"role": "user", "content": query})
-    turns.append({"role": "assistant", "content": answer})
 
 @lru_cache(maxsize=1)
 def get_client() -> AsyncOpenAI:

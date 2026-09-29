@@ -5,3 +5,7 @@ logger:
   filename: "logs/xncagent.log"
   max_size: "10 MB"
   keep_days: 30
+
+  history:
+    turns: 5
+    page_size: 30

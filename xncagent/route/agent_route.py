@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Body
 from fastapi.responses import StreamingResponse
+from typing import Optional
 
 from xncagent.agent.xiaoxizi_agent import task, task_stream
 
@@ -7,13 +8,19 @@ from xncagent.agent.xiaoxizi_agent import task, task_stream
 agent_route = APIRouter(prefix="/agent", tags=["agent"])
 
 @agent_route.post("/chat")
-async def chat(message: str = Body(embed=True)):
-    return await task(message)
+async def chat(
+    message: str = Body(embed=True),
+    session_id: Optional[int] = Body(None, embed=True),
+    ):
+    return await task(message, session_id)
 
 @agent_route.post("/chat/stream")
-async def chat_stream(message: str = Body(embed=True)):
+async def chat_stream(
+    message: str = Body(embed=True),
+    session_id: Optional[int] = Body(None, embed=True),
+    ):
     return StreamingResponse(
-        task_stream(message),
+        task_stream(message, session_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

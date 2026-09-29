@@ -1,0 +1,14 @@
+database:
+  host: ${DB_HOST:-localhost}
+  port: ${DB_PORT:-5432}
+  dbname: ${DB_NAME:-xncagent}
+  user: ${DB_USER:-xnc}
+  password: ${DB_PASSWORD:-xnc123}
+  sslmode: ${DB_SSLMODE:-disable}
+  connect_timeout: 30
+  application_name: xncagent
+
+pool:
+  min_size: 1
+  max_size: 10
+  timeout: 30.0

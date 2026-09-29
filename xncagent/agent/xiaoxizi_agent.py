@@ -1,46 +1,29 @@
 import json
-from pathlib import Path
-from typing import AsyncIterator, Optional, Set
+import asyncio
+from typing import AsyncIterator, Optional
+from typing import Any, Coroutine
+from unittest import result
 
-import yaml
-
-from xncagent.llm.llm_task import get_history_by_user_id, save_history, task_llm, task_llm_stream
+from xncagent.llm.llm_task import task_llm, task_llm_stream
 from xncagent.llm.query_rewrite import query_rewrite, SCENE_WHITELIST
+from xncagent.rdbms.message_repo import get_history_by_session, create_messages_batch
 from xncagent.scene_matcher import match_scene
 from xncagent.utils.logger import logger
 from xncagent.utils.context import get_user_id
 from xncagent.schemas.query_rewrite import RewriterQuestionResponse
-from xncagent.rag.rag_retriever import retrieve_knowledge
+from xncagent.rag.rag_retriever import retrieve_knowledge, save_user_msg
 from xncagent.config.prompts import load_system_prompt
+from xncagent.rdbms.session_repo import get_session, create_session, update_session_title_if_empty
+from xncagent.utils.exceptions import UnauthorizedException
+from xncagent.config import Config
 
 
-
-YAML_PATH = Path(__file__).resolve().parent.parent / "config" / "precheck_words.yaml"
-MIN_LENGTH = 10
-
-
-def load_precheck_words(path: Path) -> Set[str]:
-    global MIN_LENGTH
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    MIN_LENGTH = data["categories"]["min_length"]
-
-    keyword: Set[str] = set()
-    for category, words in data["categories"].items():
-        if category == "min_length" or not words:
-            continue
-        keyword.update(w.strip() for w in words if isinstance(w, str) and w.strip())
-    return keyword
-
-
-KEYWORDS: Set[str] = load_precheck_words(YAML_PATH)
-logger.info(f"已加载关键词 {len(KEYWORDS)} 个")
-
-
-def need_rewrite(query: str) -> bool:
-    if len(query) < MIN_LENGTH:
-        return True
-    return any(keyword in query for keyword in KEYWORDS)
+# 模块级：持有后台任务引用，防止被 GC 提前回收（asyncio 经典坑）
+_bg_tasks: set[asyncio.Task] = set()
+_TITLE_SYSTEM = (
+    "你是会话标题生成器。根据用户的第一句话，输出不超过 12 字的简短标题，"
+    "不要引号、不要句号、不要解释，只输出标题本身。"
+)
 
 
 def _understand(query: str, history: str) -> RewriterQuestionResponse:
@@ -97,19 +80,34 @@ def _build_messages(
 _FALLBACK_ANSWER = "奴才这会儿脑子转不过来，主子稍等片刻，奴才缓过神再来逗您。"
 
 
-def _prepare_turn(query: str) -> dict:
+def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
     """
     预检、理解、检索，拼好生成消息。
+    历史记录由原有的预检修改为合法请求都附带
 
     本地匹配也失败时 early 为 True，answer 是兜底话术，不再调用生成模型。
     """
     user_id = get_user_id()
+    logger.info(f"user_id: {user_id}")
+    if session_id is None:
+        if user_id is not None:
+            session_id = create_session(user_id)
+            logger.info(f"创建新的对话id: {session_id}")
+    else:
+        sessoin = get_session(session_id,user_id)
+        if sessoin is None:
+            logger.error(f"会话越权或不存在: session_id={session_id} requester={user_id}")
+            raise UnauthorizedException(f"未找到该用户对应的会话")
+        
+    # user_id一致,开始拿历史记录.准备把历史消息附带给llm
     history = ""
-    if need_rewrite(query) and user_id is not None:
-        history = get_history_by_user_id(user_id)
-
+    if user_id is not None and session_id is not None:
+        history = get_history_by_session(session_id,turns=Config.system.history.turns)
+        logger.info(f"history: {history}")
+    # 定义是否走降级通道标志
     degraded = False
     try:
+        # 开始走llm改写用户问题
         check_result: RewriterQuestionResponse = _understand(query, history)
         rewritten_query = check_result.rewritten_query
         scene = check_result.scene
@@ -153,6 +151,7 @@ def _prepare_turn(query: str) -> dict:
         "degraded": degraded,
         "user_id": user_id,
         "query": query,
+        "session_id": session_id,
     }
 
 
@@ -168,10 +167,89 @@ def _payload(prepared: dict, answer: str) -> dict:
 
 
 def _remember(prepared: dict, answer: str) -> None:
+    """
+    一轮结束后，异步做三件事（全部 fire-and-forget，不影响主流程）：
+      1. 生成会话标题（标题为空时）
+      2. 落库 user + assistant 两行
+      3. 把这两行 embedding 进 chroma chat_history
+    2 和 3 有依赖（embedding 要 message_id），放同一个任务里顺序执行。
+    """
     user_id = prepared["user_id"]
-    if user_id is not None and answer:
-        save_history(user_id, prepared["query"], answer)
+    session_id = prepared.get("session_id")
+    if user_id is not None or session_id is None or answer is None:
+       return
+     # 1) 标题：不依赖落库，独立起任务
+    _fire_and_forget(_generate_title(session_id, prepared["query"]))
+    # 2) 落库+embedding：需要 message_id，放一起
+    _fire_and_forget(_persist_and_embed(prepared, answer))
 
+
+def _fire_and_forget(coro: Coroutine[Any, Any, None]) -> None:
+    """
+    把 coro 扔进后台队列，不阻塞主流程。
+    """
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(lambda t: _bg_tasks.discard(t))
+
+async def _generate_title(session_id: int, query: str) -> None:
+    """
+    生成会话标题。
+    """
+    messages = [
+        {"role": "system", "content": _TITLE_SYSTEM},
+        {"role": "user", "content": query},
+    ]
+    try:
+        result = await task_llm(messages)
+        title = (result.get("answer") or "").strip().strip("「」\"'《》")[:12]
+        if not title:
+            logger.error(f"生成会话标题失败: {session_id}")
+            return
+        # 乐观锁：只有 title 还是空的时候才更新（并发下只有一个赢）
+        ok = update_session_title_if_empty(session_id, title)
+        logger.info(f"[remember] 标题生成 session_id={session_id} title={title!r} updated={ok}")
+    except Exception as e:
+        logger.exception(f"[remember] 标题生成失败 session_id={session_id}")
+    return None
+
+async def _persist_and_embed(prepared: dict, answer: str) -> Coroutine[Any, Any, None]:
+    """
+    落库+embedding。
+    """
+
+    session_id = prepared["session_id"]
+    user_id = prepared["user_id"]
+
+    # 1. 批量落库（user + assistant 一次 INSERT）
+    try:
+        user_msg_id, assistant_msg_id = create_messages_batch(
+            session_id,
+            user_id,
+            prepared["query"],
+            answer,
+            prepared["scene"],
+            prepared["rewritten_query"],
+            prepared["degraded"],
+            prepared["emotion_alert"],
+        )
+        logger.info(f"[remember] 落库+embedding session_id={session_id} user_msg_id={user_msg_id} assistant_msg_id={assistant_msg_id}")
+    except Exception as e:
+        logger.exception(f"[remember] 落库+embedding失败 session_id={session_id}")
+        return
+    
+
+     # 2. embedding：bge 是同步阻塞调用，丢线程池，别堵 event loop
+    try:
+        await asyncio.to_thread(save_user_msg,
+            session_id, user_id, user_msg_id, assistant_msg_id,
+            prepared["query"], answer
+            )
+    except Exception as e:
+        logger.exception(f"[remember] embedding失败 session_id={session_id}")
+        return
+
+    return None
 
 def _sse(data: dict | str) -> str:
     if isinstance(data, str):
@@ -179,7 +257,7 @@ def _sse(data: dict | str) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def task(query: str) -> Optional[dict]:
+async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
     """
     预检、理解、检索、生成，并记下这一轮。
 
@@ -197,8 +275,9 @@ async def task(query: str) -> Optional[dict]:
     降级通道：LLM 失败时用 match_scene 的 scene 继续检索；
     场景是「无关闲聊」时跳过检索。bge 也失败才返回兜底话术。
     """
-    prepared = _prepare_turn(query)
+    prepared = _prepare_turn(query,session_id)
     if prepared["early"]:
+        # llm和本地调用都失败,走兜底话术
         return _payload(prepared, prepared["answer"])
 
     task_result = await task_llm(prepared["messages"])
@@ -207,18 +286,19 @@ async def task(query: str) -> Optional[dict]:
     return _payload(prepared, answer)
 
 
-async def task_stream(query: str) -> AsyncIterator[str]:
+async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[str]:
     """
     与 task 同一套预检、检索和记历史，生成改为 task_llm_stream。
 
     先推一帧元数据，再逐段推文本，最后一帧为 [DONE]。
     """
-    prepared = _prepare_turn(query)
+    prepared = _prepare_turn(query,session_id)
     meta = _payload(prepared, prepared["answer"] if prepared["early"] else "")
     meta.pop("answer")
     yield _sse(meta)
 
     if prepared["early"]:
+        # 全部失败,走兜底话术
         yield _sse({"text": prepared["answer"]})
         yield _sse("[DONE]")
         return

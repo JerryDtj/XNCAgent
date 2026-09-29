@@ -35,8 +35,8 @@ from xncagent.rag.index_store import (
     COLLECTION_NAME,
     MODEL_NAME,
     VECTOR_PERSIST_PATH,
-    _init_chroma_client,
     init_embedding_model,
+    init_chroma_client
 )
 
 from llama_index.core import (
@@ -48,8 +48,6 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from chromadb.errors import InvalidCollectionException
-
-from tqdm import tqdm
 
 vector_config = Config['rag']['vector_store']
 DOCS_DIR = vector_config.get('docs_dir_abs',Path("doc/话术"))
@@ -137,7 +135,7 @@ def init_chroma_store():
     初始化Chroma向量存储
     :return: Chroma向量存储
     """
-    client = _init_chroma_client()
+    client = init_chroma_client()
     _backup_existing_collection(client)
 
     collection = client.create_collection(

@@ -8,7 +8,7 @@ os.environ["HF_HOME"] = str(_PROJECT_DIR / "models" / "models")
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from xncagent.utils.chromadb_import import disable_overrides_type_hint_check
+from xncagent.rag.chromadb_import import disable_overrides_type_hint_check
 
 disable_overrides_type_hint_check()
 
@@ -50,7 +50,7 @@ def init_embedding_model() -> HuggingFaceEmbedding:
     return _embed_model
 
 
-def _init_chroma_client() -> chromadb.Client:
+def init_chroma_client() -> chromadb.Client:
     """
     初始化Chroma客户端
     :return: Chroma客户端
@@ -70,7 +70,7 @@ def get_index() -> VectorStoreIndex:
     """
     init_embedding_model()
 
-    client = _init_chroma_client()
+    client = init_chroma_client()
     connection = client.get_collection(name=COLLECTION_NAME)
     vector_store = ChromaVectorStore(chroma_collection=connection)
     return VectorStoreIndex.from_vector_store(vector_store=vector_store)
