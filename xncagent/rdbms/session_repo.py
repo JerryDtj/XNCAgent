@@ -1,7 +1,7 @@
-from sqlite3 import Row
 from xncagent.rdbms.postgres import get_cursor
 from xncagent.schemas.chat_session import ChatSession
 from typing import Optional
+
 
 def create_session(user_id:int, title:str = "") -> int:
     """新建会话，返回 session_id。"""
@@ -44,7 +44,7 @@ def delete_session(session_id:int) -> None:
             WHERE id = %s
         """, (session_id,))
 
-def list_sessions(user_id:int) -> List[ChatSession]:
+def list_sessions(user_id:int) -> list[ChatSession]:
     with get_cursor() as cur:
         cur.execute("""
             SELECT id, user_id, title, message_count, last_message_at, created_at, updated_at

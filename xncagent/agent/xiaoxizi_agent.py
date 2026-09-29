@@ -2,7 +2,6 @@ import json
 import asyncio
 from typing import AsyncIterator, Optional
 from typing import Any, Coroutine
-from unittest import result
 
 from xncagent.llm.llm_task import task_llm, task_llm_stream
 from xncagent.llm.query_rewrite import query_rewrite, SCENE_WHITELIST
@@ -79,6 +78,26 @@ def _build_messages(
 
 _FALLBACK_ANSWER = "奴才这会儿脑子转不过来，主子稍等片刻，奴才缓过神再来逗您。"
 
+def _ensure_session(session_id: Optional[int]) -> tuple[Optional[int], Optional[str]]:
+    """
+    确保会话存在，返回 (session_id, title)。
+    - 前端没传 session_id：新建，title 必然为空
+    - 前端传了：校验归属，带出已有 title
+    """
+    user_id = get_user_id()
+    logger.info(f"user_id: {user_id}")
+    if session_id is None:
+        if user_id is None:
+            return None, None
+        new_id = create_session(user_id)
+        logger.info(f"创建新的对话id: {new_id}")
+        return new_id, None
+
+    session = get_session(session_id, user_id)
+    if session is None:
+        logger.error(f"会话越权或不存在: session_id={session_id} requester={user_id}")
+        raise UnauthorizedException("未找到该用户对应的会话")
+    return session.id, session.title
 
 def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
     """
@@ -86,19 +105,7 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
     历史记录由原有的预检修改为合法请求都附带
 
     本地匹配也失败时 early 为 True，answer 是兜底话术，不再调用生成模型。
-    """
-    user_id = get_user_id()
-    logger.info(f"user_id: {user_id}")
-    if session_id is None:
-        if user_id is not None:
-            session_id = create_session(user_id)
-            logger.info(f"创建新的对话id: {session_id}")
-    else:
-        sessoin = get_session(session_id,user_id)
-        if sessoin is None:
-            logger.error(f"会话越权或不存在: session_id={session_id} requester={user_id}")
-            raise UnauthorizedException(f"未找到该用户对应的会话")
-        
+    """    
     # user_id一致,开始拿历史记录.准备把历史消息附带给llm
     history = ""
     if user_id is not None and session_id is not None:
@@ -155,7 +162,10 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
     }
 
 
-def _payload(prepared: dict, answer: str) -> dict:
+def _payload(session_id: int, prepared: dict, answer: str) -> dict:
+    """
+    失败消息构建
+    """
     return {
         "answer": answer,
         "rewritten_query": prepared["rewritten_query"],
@@ -163,10 +173,22 @@ def _payload(prepared: dict, answer: str) -> dict:
         "emotion_alert": prepared["emotion_alert"],
         "confidence": prepared["confidence"],
         "degraded": prepared["degraded"],
+        "session_id": session_id,
     }
 
 
-def _remember(prepared: dict, answer: str) -> None:
+def _title_save(prepared: dict, answer: str) -> None:
+    """
+    消息保存。
+    """
+    user_id = prepared["user_id"]
+    session_id = prepared.get("session_id")
+    if user_id is None or session_id is None or answer is None:
+       return 
+    # 1) 标题：不依赖落库，独立起任务
+    _fire_and_forget(_generate_title(session_id, prepared["query"]))
+
+def _remember(prepared: dict, answer: str, title: str) -> None:
     """
     一轮结束后，异步做三件事（全部 fire-and-forget，不影响主流程）：
       1. 生成会话标题（标题为空时）
@@ -174,12 +196,9 @@ def _remember(prepared: dict, answer: str) -> None:
       3. 把这两行 embedding 进 chroma chat_history
     2 和 3 有依赖（embedding 要 message_id），放同一个任务里顺序执行。
     """
-    user_id = prepared["user_id"]
-    session_id = prepared.get("session_id")
-    if user_id is not None or session_id is None or answer is None:
-       return
-     # 1) 标题：不依赖落库，独立起任务
-    _fire_and_forget(_generate_title(session_id, prepared["query"]))
+    if not title:
+    # 1) 标题：不依赖落库，独立起任务
+        _title_save(prepared, answer)
     # 2) 落库+embedding：需要 message_id，放一起
     _fire_and_forget(_persist_and_embed(prepared, answer))
 
@@ -238,16 +257,17 @@ async def _persist_and_embed(prepared: dict, answer: str) -> Coroutine[Any, Any,
         logger.exception(f"[remember] 落库+embedding失败 session_id={session_id}")
         return
     
-
-     # 2. embedding：bge 是同步阻塞调用，丢线程池，别堵 event loop
-    try:
-        await asyncio.to_thread(save_user_msg,
-            session_id, user_id, user_msg_id, assistant_msg_id,
-            prepared["query"], answer
-            )
-    except Exception as e:
-        logger.exception(f"[remember] embedding失败 session_id={session_id}")
-        return
+    # 如果llm和本地调用都失败进入兜底,那么就没有必要在入chroma
+    if not prepared["early"]:
+        # 2. embedding：bge 是同步阻塞调用，丢线程池，别堵 event loop
+        try:
+            await asyncio.to_thread(save_user_msg,
+                session_id, user_id, user_msg_id, assistant_msg_id,
+                prepared["query"], answer
+                )
+        except Exception as e:
+            logger.exception(f"[remember] embedding失败 session_id={session_id}")
+            return
 
     return None
 
@@ -275,14 +295,16 @@ async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
     降级通道：LLM 失败时用 match_scene 的 scene 继续检索；
     场景是「无关闲聊」时跳过检索。bge 也失败才返回兜底话术。
     """
+    session_id, title = _ensure_session(session_id)
     prepared = _prepare_turn(query,session_id)
     if prepared["early"]:
-        # llm和本地调用都失败,走兜底话术
+        # llm和本地调用都失败,走兜底话术,并且保存消息
+        _remember(prepared, prepared["answer"], title)
         return _payload(prepared, prepared["answer"])
 
     task_result = await task_llm(prepared["messages"])
     answer = task_result["answer"]
-    _remember(prepared, answer)
+    _remember(prepared, answer, title)
     return _payload(prepared, answer)
 
 
@@ -290,15 +312,16 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
     """
     与 task 同一套预检、检索和记历史，生成改为 task_llm_stream。
 
-    先推一帧元数据，再逐段推文本，最后一帧为 [DONE]。
     """
+    session_id, title = _ensure_session(session_id)
     prepared = _prepare_turn(query,session_id)
-    meta = _payload(prepared, prepared["answer"] if prepared["early"] else "")
+    meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
     meta.pop("answer")
     yield _sse(meta)
 
     if prepared["early"]:
         # 全部失败,走兜底话术
+        _remember(prepared, prepared["answer"], title)
         yield _sse({"text": prepared["answer"]})
         yield _sse("[DONE]")
         return
@@ -308,7 +331,7 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
         async for delta in task_llm_stream(prepared["messages"], temperature=0.5):
             parts.append(delta)
             yield _sse({"text": delta})
-        _remember(prepared, "".join(parts))
+        _remember(prepared, "".join(parts), title)
         yield _sse("[DONE]")
     except Exception as e:
         logger.exception("[LLM] 流式生成异常")
