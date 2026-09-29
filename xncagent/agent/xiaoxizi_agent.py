@@ -232,7 +232,7 @@ async def _generate_title(session_id: int, query: str) -> None:
         logger.exception(f"[remember] 标题生成失败 session_id={session_id}")
     return None
 
-async def _persist_and_embed(prepared: dict, answer: str) -> Coroutine[Any, Any, None]:
+async def _persist_and_embed(prepared: dict, answer: str) -> None:
     """
     落库+embedding。
     """
