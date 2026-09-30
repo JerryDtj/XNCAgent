@@ -12,7 +12,7 @@ from xncagent.utils.context import get_user_id
 from xncagent.schemas.query_rewrite import RewriterQuestionResponse
 from xncagent.rag.rag_retriever import retrieve_knowledge, save_user_msg
 from xncagent.config.prompts import load_system_prompt
-from xncagent.rdbms.session_repo import get_session, create_session, update_session_title_if_empty
+from xncagent.rdbms.session_repo import get_session, create_session, update_session_title_if_empty, list_sessions
 from xncagent.utils.exceptions import UnauthorizedException
 from xncagent.config import system_config
 
@@ -282,7 +282,6 @@ async def _check_user_id() -> str:
     user_id = get_user_id()
     logger.info(f"user_id: {user_id}")
     if user_id is None:
-        
         logger.error("_check_user_id没有获取到用户id,拒绝请求")
         raise UnauthorizedException("用户未登录")
     return user_id
@@ -351,3 +350,17 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
     except Exception as e:
         logger.exception("[LLM] 流式生成异常")
         yield _sse({"error": str(e)})
+
+async def session_list(page: int, page_size: int) -> list[dict]:
+    user_id = await _check_user_id()
+    session_list = list_sessions(user_id, page, page_size)
+    return None
+
+async def update_session_title(id: int, title: str) -> None:
+    await None
+
+async def delete_session_by_id(id: int) -> None:
+    await None
+
+async def list_messages(id: int, page: int, page_size: int) -> list[dict]:
+    return None

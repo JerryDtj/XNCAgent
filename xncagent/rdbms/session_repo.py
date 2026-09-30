@@ -1,6 +1,9 @@
+from typing import Any, Optional
+
 from xncagent.rdbms.postgres import get_cursor
 from xncagent.schemas.chat_session import ChatSession
-from typing import Optional
+
+Row = dict[str, Any]
 
 
 def create_session(user_id:int, title:str = "") -> int:
@@ -37,6 +40,19 @@ def update_session_title_if_empty(session_id: int, title: str) -> bool:
         )
         return cur.rowcount > 0
 
+def update_session_title(session_id: int, title: str) -> bool:
+    """用户改名：无条件覆盖 title。"""
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            UPDATE chat_sessions
+            SET title = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (title, session_id),
+        )
+        return cur.rowcount > 0
+
 def delete_session(session_id:int) -> None:
     with get_cursor() as cur:
         cur.execute("""
@@ -44,14 +60,38 @@ def delete_session(session_id:int) -> None:
             WHERE id = %s
         """, (session_id,))
 
-def list_sessions(user_id:int) -> list[ChatSession]:
+def list_sessions(
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[Row], int]:
+    """按 last_message_at 倒序分页；LEFT JOIN 摘要，没有则 summary 为空串。"""
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+    offset = (page - 1) * page_size
     with get_cursor() as cur:
-        cur.execute("""
-            SELECT id, user_id, title, message_count, last_message_at, created_at, updated_at
-            FROM chat_sessions
-            WHERE user_id = %s
-        """, (user_id,))
-        return [ChatSession(**row) for row in cur.fetchall()]
+        cur.execute(
+            "SELECT COUNT(*) AS cnt FROM chat_sessions WHERE user_id = %s",
+            (user_id,),
+        )
+        total = cur.fetchone()["cnt"]
+        cur.execute(
+            """
+            SELECT
+                s.id,
+                s.title,
+                COALESCE(ss.summary, '') AS summary,
+                s.message_count,
+                s.last_message_at
+            FROM chat_sessions s
+            LEFT JOIN chat_session_summaries ss ON ss.session_id = s.id
+            WHERE s.user_id = %s
+            ORDER BY s.last_message_at DESC NULLS LAST, s.id DESC
+            LIMIT %s OFFSET %s
+            """,
+            (user_id, page_size, offset),
+        )
+        return cur.fetchall(), total
 
 def get_session_message_count(session_id:int) -> int:
     with get_cursor() as cur:
