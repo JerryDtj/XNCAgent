@@ -11,7 +11,7 @@ def create_session(user_id:int, title:str = "") -> int:
             VALUES (%s, %s)
             RETURNING id
         """, (user_id, title))
-        return cur.fetchone()[0]
+        return cur.fetchone()["id"]
 
 def get_session(session_id:int, user_id:Optional[int]) -> Optional[ChatSession]:
     """按 id + user_id 查会话，用于越权校验；不存在返回 None。"""
@@ -60,7 +60,7 @@ def get_session_message_count(session_id:int) -> int:
             FROM chat_sessions
             WHERE id = %s
         """, (session_id,))
-        return cur.fetchone()[0]
+        return cur.fetchone()["message_count"]
 
 def update_session_message_count(session_id:int, message_count:int) -> None:
     with get_cursor() as cur:

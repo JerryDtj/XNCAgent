@@ -14,7 +14,7 @@ from xncagent.rag.rag_retriever import retrieve_knowledge, save_user_msg
 from xncagent.config.prompts import load_system_prompt
 from xncagent.rdbms.session_repo import get_session, create_session, update_session_title_if_empty
 from xncagent.utils.exceptions import UnauthorizedException
-from xncagent.config import Config
+from xncagent.config import system_config
 
 
 # 模块级：持有后台任务引用，防止被 GC 提前回收（asyncio 经典坑）
@@ -78,14 +78,12 @@ def _build_messages(
 
 _FALLBACK_ANSWER = "奴才这会儿脑子转不过来，主子稍等片刻，奴才缓过神再来逗您。"
 
-def _ensure_session(session_id: Optional[int]) -> tuple[Optional[int], Optional[str]]:
+def _ensure_session(session_id: Optional[int], user_id: str) -> tuple[Optional[int], Optional[str]]:
     """
     确保会话存在，返回 (session_id, title)。
     - 前端没传 session_id：新建，title 必然为空
     - 前端传了：校验归属，带出已有 title
     """
-    user_id = get_user_id()
-    logger.info(f"user_id: {user_id}")
     if session_id is None:
         if user_id is None:
             return None, None
@@ -109,7 +107,7 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
     # user_id一致,开始拿历史记录.准备把历史消息附带给llm
     history = ""
     if session_id is not None:
-        history = get_history_by_session(session_id,turns=Config.system.history.turns)
+        history = get_history_by_session(session_id, turns=system_config["history"]["turns"])
         logger.info(f"history: {history}")
     # 定义是否走降级通道标志
     degraded = False
@@ -134,8 +132,8 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
                 "emotion_alert": False,
                 "confidence": 0.0,
                 "degraded": True,
-                "user_id": None,
                 "query": query,
+                "session_id": session_id,
             }
         rewritten_query = query
         emotion_alert = False
@@ -156,7 +154,6 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
         "emotion_alert": emotion_alert,
         "confidence": confidence,
         "degraded": degraded,
-        "user_id": user_id,
         "query": query,
         "session_id": session_id,
     }
@@ -188,18 +185,16 @@ def _title_save(prepared: dict, answer: str) -> None:
     # 1) 标题：不依赖落库，独立起任务
     _fire_and_forget(_generate_title(session_id, prepared["query"]))
 
-def _remember(prepared: dict, answer: str, title: str) -> None:
+def _remember(prepared: dict, answer: str, title: Optional[str]) -> None:
     """
     一轮结束后，异步做三件事（全部 fire-and-forget，不影响主流程）：
-      1. 生成会话标题（标题为空时）
+      1. 仅当本会话 title 仍为空时生成标题；失败则保持空，下次再试
       2. 落库 user + assistant 两行
       3. 把这两行 embedding 进 chroma chat_history
     2 和 3 有依赖（embedding 要 message_id），放同一个任务里顺序执行。
     """
-    if not title:
-    # 1) 标题：不依赖落库，独立起任务
+    if not (title or "").strip():
         _title_save(prepared, answer)
-    # 2) 落库+embedding：需要 message_id，放一起
     _fire_and_forget(_persist_and_embed(prepared, answer))
 
 
@@ -276,6 +271,22 @@ def _sse(data: dict | str) -> str:
         return f"data: {data}\n\n"
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+async def _check_user_id() -> str:
+    """
+        为空的几种情况:
+            请求没走网关，直接打到 Python（本机 18000、脚本、测试）。浏览器里已经登录也没用，这个进程看不到 token。
+            直接打到 Python，但 X-User-Id 缺失、不是整数，或者小于等于 0。中间件会把它收成 None。
+            在请求之外调用 get_user_id()，比如新开的线程，或请求已经结束的后台任务。ContextVar 不会跟到这些地方，默认就是 None。
+        不论哪一种,直接到这里为空都是不合理的,所以这里直接拒绝掉
+    """
+    user_id = get_user_id()
+    logger.info(f"user_id: {user_id}")
+    if user_id is None:
+        
+        logger.error("_check_user_id没有获取到用户id,拒绝请求")
+        raise UnauthorizedException("用户未登录")
+    return user_id
+
 
 async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
     """
@@ -295,17 +306,19 @@ async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
     降级通道：LLM 失败时用 match_scene 的 scene 继续检索；
     场景是「无关闲聊」时跳过检索。bge 也失败才返回兜底话术。
     """
-    session_id, title = _ensure_session(session_id)
-    prepared = _prepare_turn(query,session_id)
+    user_id = await _check_user_id()
+    session_id, title = _ensure_session(session_id, user_id)
+    prepared = _prepare_turn(query, session_id)
+    prepared["user_id"] = user_id
     if prepared["early"]:
         # llm和本地调用都失败,走兜底话术,并且保存消息
         _remember(prepared, prepared["answer"], title)
-        return _payload(prepared, prepared["answer"])
+        return _payload(session_id, prepared, prepared["answer"])
 
     task_result = await task_llm(prepared["messages"])
     answer = task_result["answer"]
     _remember(prepared, answer, title)
-    return _payload(prepared, answer)
+    return _payload(session_id, prepared, answer)
 
 
 async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[str]:
@@ -313,8 +326,10 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
     与 task 同一套预检、检索和记历史，生成改为 task_llm_stream。
 
     """
-    session_id, title = _ensure_session(session_id)
-    prepared = _prepare_turn(query,session_id)
+    user_id = await _check_user_id()
+    session_id, title = _ensure_session(session_id, user_id)
+    prepared = _prepare_turn(query, session_id)
+    prepared["user_id"] = user_id
     meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
     meta.pop("answer")
     yield _sse(meta)

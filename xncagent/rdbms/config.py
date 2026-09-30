@@ -63,7 +63,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         raw = yaml.safe_load(f)
 
     raw = _replace_env_vars(raw)
-    return AppConfig(**raw)
+    return AppConfig(**raw) 
 
 config = load_config(CONFIG_PATH)
 

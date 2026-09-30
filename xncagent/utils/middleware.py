@@ -5,12 +5,17 @@ from xncagent.utils.context import set_request_id, set_user_id
 from xncagent.utils.logger import logger
 
 def _to_pos_int_or_none(value):
+    if value is None:
+        return None
     try:
         n = int(value)
     except (TypeError, ValueError):
-        logger.error(f"userId验证失败: {value}")
+        logger.warning(f"userId验证失败: {value}")
         return None
-    return n if n > 0 else None
+    if n <= 0:
+        logger.warning(f"userId验证失败: {value}")
+        return None
+    return n
 
 async def request_id_middleware(request: Request, call_next) -> JSONResponse:
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())

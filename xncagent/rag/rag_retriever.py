@@ -46,12 +46,12 @@ def save_user_msg(session_id: int, user_id: int, user_msg_id: int, assistant_msg
     ]
 
     texts = [d["text"] for d in doc]
-    embedding = model.encode(texts,normalize_embeddings=True).tolist()
+    embedding = model.get_text_embedding_batch(texts)
 
     collection.upsert(
         ids = [d["id"] for d in doc],
         embeddings = embedding,
-        texts = texts,
+        documents = texts,
         metadatas = [
             {
                 "user_id": user_id,

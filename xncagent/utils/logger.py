@@ -2,6 +2,7 @@
 日志记录器
 """
 
+import logging
 from pathlib import Path
 import sys
 from xncagent.config import Config
@@ -33,6 +34,35 @@ logger.add(
     format=FILE_FORMAT,
     encoding="utf-8",
 )
+
+
+# uvicorn access log 走标准库 logging，与上面的 loguru 分开配置。
+_NOISY_ACCESS_PATHS = {"/json/version", "/favicon.ico"}
+
+
+class _NoisyAccessPathFilter(logging.Filter):
+    """丢弃浏览器固定探测路径的 access 记录，其余 404 保留。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        path = _access_log_path(record)
+        if path is None:
+            return True
+        return path.split("?", 1)[0] not in _NOISY_ACCESS_PATHS
+
+
+def _access_log_path(record: logging.LogRecord) -> str | None:
+    args = record.args
+    if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+        return args[2]
+    return None
+
+
+def suppress_noisy_access_logs() -> None:
+    """把探测路径过滤器挂到 uvicorn.access，重复调用只挂一次。"""
+    access_logger = logging.getLogger("uvicorn.access")
+    if any(isinstance(existing, _NoisyAccessPathFilter) for existing in access_logger.filters):
+        return
+    access_logger.addFilter(_NoisyAccessPathFilter())
 
 
 

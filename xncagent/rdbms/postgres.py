@@ -1,12 +1,15 @@
+from contextlib import contextmanager
+import threading
+
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
-from contextlib import contextmanager
 from psycopg_pool import ConnectionPool
 
 from xncagent.rdbms.config import config
 from xncagent.utils.logger import logger
 
 _pool: ConnectionPool | None = None
+_pool_lock = threading.Lock()
 
 def _make_conninfo(db_cfg) -> str:
     params = {
@@ -24,28 +27,34 @@ def _make_conninfo(db_cfg) -> str:
     return make_conninfo(**params)
 
 def init_pool(db_cfg=None, pool_cfg=None) -> None:
-    """显式初始化连接池。测试里可传自定义配置。"""
+    """每个进程建一次。同进程内的线程共用这一个池。"""
     global _pool
     if _pool is not None:
         return
-    db_cfg = db_cfg or config.database
-    pool_cfg = pool_cfg or config.pool
-    _pool = ConnectionPool(
-        conninfo=_make_conninfo(db_cfg),
-        min_size=pool_cfg.min_size,
-        max_size=pool_cfg.max_size,
-        timeout=pool_cfg.timeout,
-        kwargs={"row_factory": dict_row},
-        open=False,
-    )
-    _pool.open()
-    logger.info("连接池已启动: %s", db_cfg.application_name)
+    with _pool_lock:
+        if _pool is not None:
+            return
+        db_cfg = db_cfg or config.database
+        pool_cfg = pool_cfg or config.pool
+        pool = ConnectionPool(
+            conninfo=_make_conninfo(db_cfg),
+            min_size=pool_cfg.min_size,
+            max_size=pool_cfg.max_size,
+            timeout=pool_cfg.timeout,
+            kwargs={"row_factory": dict_row},
+            open=False,
+        )
+        pool.open()
+        _pool = pool
+        logger.info("连接池已启动: {}", db_cfg.application_name)
 
 def close_pool() -> None:
     global _pool
-    if _pool is not None:
-        _pool.close()
+    with _pool_lock:
+        pool = _pool
         _pool = None
+    if pool is not None:
+        pool.close()
         logger.info("连接池已关闭")
 
 @contextmanager

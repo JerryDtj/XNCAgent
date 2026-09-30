@@ -100,7 +100,7 @@ cp .env.example .env
 uv run start
 ```
 
-等价于 `uv run python -m xncagent`。入口是 `xncagent/__main__.py`，用 uvicorn 拉起 FastAPI，监听 `http://127.0.0.1:8000`（开发模式会自动重载）。
+等价于 `uv run python -m xncagent`。入口是 `xncagent/__main__.py`，用 uvicorn 拉起 FastAPI，监听 `http://127.0.0.1:18000`（开发模式会自动重载）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -113,7 +113,7 @@ uv run start
 ```
 XNCAgent/
 ├── xncagent/
-│   ├── __main__.py                  # 启动入口：组装 FastAPI 并用 uvicorn 监听 :8000
+│   ├── __main__.py                  # 启动入口：组装 FastAPI 并用 uvicorn 监听 :18000
 │   ├── agent/                       # 对话主流程
 │   ├── route/                       # /agent/chat、/agent/chat/stream
 │   ├── config/                      # 提示词与场景配置
