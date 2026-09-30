@@ -108,7 +108,7 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
     """    
     # user_id一致,开始拿历史记录.准备把历史消息附带给llm
     history = ""
-    if user_id is not None and session_id is not None:
+    if session_id is not None:
         history = get_history_by_session(session_id,turns=Config.system.history.turns)
         logger.info(f"history: {history}")
     # 定义是否走降级通道标志

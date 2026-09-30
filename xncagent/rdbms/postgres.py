@@ -1,10 +1,9 @@
 from psycopg.conninfo import make_conninfo
-from psycopg_pool import Pool
 from psycopg.rows import dict_row
 from contextlib import contextmanager
-from psycopg.connection import ConnectionPool
+from psycopg_pool import ConnectionPool
 
-from xncagent.config import config
+from xncagent.rdbms.config import config
 from xncagent.utils.logger import logger
 
 _pool: ConnectionPool | None = None
