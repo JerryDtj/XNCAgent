@@ -1,5 +1,6 @@
 import json
 import asyncio
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 from typing import Any, Coroutine
 
@@ -9,12 +10,19 @@ from xncagent.rdbms.message_repo import (
     get_history_by_session,
     create_messages_batch,
     list_messages_for_summary,
+    get_messages_by_ids,
 )
 from xncagent.scene_matcher import match_scene
 from xncagent.utils.logger import logger
 from xncagent.utils.context import get_user_id
 from xncagent.schemas.query_rewrite import RewriterQuestionResponse
-from xncagent.rag.rag_retriever import retrieve_knowledge, save_user_msg, save_session_summary
+from xncagent.rag.rag_retriever import (
+    retrieve_knowledge,
+    save_user_msg,
+    save_session_summary,
+    retrieve_user_vectors,
+    _HISTORY_COLLECTION,
+)
 from xncagent.config.prompts import load_system_prompt
 from xncagent.rdbms.session_repo import (
     get_session,
@@ -24,6 +32,7 @@ from xncagent.rdbms.session_repo import (
     get_session_message_count,
     get_summary_covered_count,
     upsert_session_summary,
+    get_sessions_by_ids,
 )
 from xncagent.utils.exceptions import UnauthorizedException
 from xncagent.config import system_config
@@ -40,6 +49,7 @@ _TITLE_SYSTEM = (
 _SUMMARY_SYSTEM = "总结这个会话主人和小喜子聊了什么，≤100 字，只输出摘要正文。"
 _SUMMARY_UNCOVERED = 10
 _SUMMARY_MAX_CHARS = 100
+_RECALL_TOP_K = 5
 
 
 def _understand(query: str, history: str) -> RewriterQuestionResponse:
@@ -67,9 +77,11 @@ def _build_messages(
     history: str,
     knowledge: str,
     emotion_alert: bool,
+    memory: str = "",
 ) -> list[dict[str, str]]:
     """
-    构建生成消息。话术参考附在系统提示词后面，历史和本轮输入放在用户消息里。
+    构建生成消息。话术参考和旧会话记忆附在系统提示词后面，历史和本轮输入放在用户消息里。
+    安全树洞放在记忆之后，优先级高于记忆内容。
     """
     system = load_system_prompt("xiaoxizi_system")
     if knowledge:
@@ -78,6 +90,13 @@ def _build_messages(
             "下面是按当前场景从知识库检索到的话术。借口气和招式，用自己的话说，"
             "不要逐字复读，也不要提及知识库。\n"
             f"{knowledge}"
+        )
+    if memory:
+        system += (
+            "\n\n# 旧会话记忆\n"
+            "下面是主人在别的会话里说过的原话。只根据这些原话回忆；"
+            "没写到的事不要编，老实说不记得。\n"
+            f"{memory}"
         )
     if emotion_alert:
         system += (
@@ -114,7 +133,108 @@ def _ensure_session(session_id: Optional[int], user_id: str) -> tuple[Optional[i
         raise UnauthorizedException("未找到该用户对应的会话")
     return session.id, session.title
 
-def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
+def _relative_time(value: Any) -> str:
+    if not isinstance(value, datetime):
+        return "刚刚"
+    # 无时区的旧值按 UTC 钟面理解；TIMESTAMPTZ 读出来带时区，按它自己的时区比。
+    if value.tzinfo is None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+    else:
+        now = datetime.now(value.tzinfo)
+    minutes = int((now - value).total_seconds() // 60)
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    return f"{hours // 24} 天前"
+
+
+def _format_recall_block(hits: list) -> str:
+    """按 session_id 批量查标题，拼成带来源和相对时间的记忆块。"""
+    session_ids: list[int] = []
+    message_ids: list[int] = []
+    for hit in hits:
+        session_id = int(hit.node.metadata["session_id"])
+        if session_id not in session_ids:
+            session_ids.append(session_id)
+        message_id = hit.node.metadata.get("message_id")
+        if message_id is not None:
+            message_ids.append(int(message_id))
+    sessions = get_sessions_by_ids(session_ids)
+    messages = get_messages_by_ids(message_ids)
+
+    grouped: dict[int, list] = {}
+    order: list[int] = []
+    for hit in hits:
+        session_id = int(hit.node.metadata["session_id"])
+        if session_id not in sessions:
+            continue
+        if session_id not in grouped:
+            order.append(session_id)
+            grouped[session_id] = []
+        grouped[session_id].append(hit)
+
+    blocks: list[str] = []
+    for session_id in order:
+        rows = grouped[session_id]
+        rows.sort(key=lambda hit: int(hit.node.metadata.get("message_id") or 0))
+        title = sessions[session_id].get("title") or "未命名会话"
+        times = []
+        lines = []
+        for hit in rows:
+            meta = hit.node.metadata
+            message_id = meta.get("message_id")
+            created_at = None
+            if message_id is not None:
+                created_at = (messages.get(int(message_id)) or {}).get("created_at")
+            if created_at is not None:
+                times.append(created_at)
+            role = "小喜子" if meta.get("role") == "assistant" else "主人"
+            lines.append(f"{role}: {hit.node.get_content().strip()}")
+        when = _relative_time(min(times) if times else sessions[session_id].get("created_at"))
+        blocks.append(f"（来自会话《{title}》，{when}）\n" + "\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _recall_memory(recall_query: str, user_id: Optional[int], degraded: bool) -> str:
+    """
+    recall_query 非空、有 user_id、且不是降级轮时，查 chat_history top 5。
+    为空或失败只记日志，返回空串。
+    """
+    if degraded or user_id is None or not recall_query:
+        logger.info(
+            f"[recall] 未触发检索 recall_query={recall_query!r} "
+            f"user_id={user_id} degraded={degraded}"
+        )
+        return ""
+    try:
+        hits = retrieve_user_vectors(
+            recall_query,
+            user_id,
+            collections=(_HISTORY_COLLECTION,),
+            top_k=_RECALL_TOP_K,
+        )
+        if not hits:
+            logger.info(f"[recall] 检索无命中 recall_query={recall_query!r}")
+            return ""
+        block = _format_recall_block(hits)
+    except Exception:
+        logger.exception(f"[recall] 检索失败 recall_query={recall_query!r}")
+        return ""
+    if not block:
+        logger.info(f"[recall] 命中无法对应到会话 recall_query={recall_query!r}")
+        return ""
+    logger.info(
+        f"[recall] 注入旧会话记忆 hits={len(hits)} "
+        f"recall_query={recall_query!r} block={block[:200]!r}"
+    )
+    return block
+
+
+def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] = None) -> dict:
     """
     预检、理解、检索，拼好生成消息。
     历史记录由原有的预检修改为合法请求都附带
@@ -128,6 +248,7 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
         logger.info(f"history: {history}")
     # 定义是否走降级通道标志
     degraded = False
+    recall_query = ""
     try:
         # 开始走llm改写用户问题
         check_result: RewriterQuestionResponse = _understand(query, history)
@@ -135,6 +256,7 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
         scene = check_result.scene
         emotion_alert = check_result.emotion_alert
         confidence = check_result.confidence
+        recall_query = (check_result.recall_query or "").strip()
     except Exception as e:
         logger.error(f"LLM 统一调用失败，降级为本地场景匹配: {e}")
         try:
@@ -163,9 +285,10 @@ def _prepare_turn(query: str,session_id: Optional[int]) -> dict:
         logger.info(f"场景 [{scene}] 不在检索白名单，跳过知识库")
         knowledge_result = ""
 
+    memory = _recall_memory(recall_query, user_id, degraded)
     return {
         "early": False,
-        "messages": _build_messages(query, history, knowledge_result, emotion_alert),
+        "messages": _build_messages(query, history, knowledge_result, emotion_alert, memory),
         "rewritten_query": rewritten_query,
         "scene": scene,
         "emotion_alert": emotion_alert,
@@ -393,7 +516,7 @@ async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
     """
     user_id = await _check_user_id()
     session_id, title = _ensure_session(session_id, user_id)
-    prepared = _prepare_turn(query, session_id)
+    prepared = _prepare_turn(query, session_id, user_id)
     prepared["user_id"] = user_id
     if prepared["early"]:
         # llm和本地调用都失败,走兜底话术,并且保存消息
@@ -413,7 +536,7 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
     """
     user_id = await _check_user_id()
     session_id, title = _ensure_session(session_id, user_id)
-    prepared = _prepare_turn(query, session_id)
+    prepared = _prepare_turn(query, session_id, user_id)
     prepared["user_id"] = user_id
     meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
     meta.pop("answer")

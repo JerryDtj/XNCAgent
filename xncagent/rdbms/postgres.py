@@ -12,6 +12,11 @@ _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
 
 def _make_conninfo(db_cfg) -> str:
+    # 会话时区固定东八区，TIMESTAMPTZ 读出来就是本地钟面。
+    options = "-c timezone=Asia/Shanghai"
+    extra = getattr(db_cfg, "options", None)
+    if extra:
+        options = f"{options} {extra}"
     params = {
         "host": db_cfg.host,
         "port": db_cfg.port,
@@ -21,9 +26,8 @@ def _make_conninfo(db_cfg) -> str:
         "sslmode": db_cfg.sslmode,
         "connect_timeout": db_cfg.connect_timeout,
         "application_name": db_cfg.application_name,
+        "options": options,
     }
-    if getattr(db_cfg, "options", None):
-        params["options"] = db_cfg.options
     return make_conninfo(**params)
 
 def init_pool(db_cfg=None, pool_cfg=None) -> None:

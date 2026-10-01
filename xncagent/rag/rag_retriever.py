@@ -118,29 +118,64 @@ def _collection_names(client) -> set[str]:
     return names
 
 
-def _query_one(client, name: str, embedding: list[float], where: dict) -> dict:
+def _query_one(client, name: str, embedding: list[float], where: dict, top_k: int) -> dict:
     return client.get_collection(name).query(
         query_embeddings=[embedding],
-        n_results=_TOP_K,
+        n_results=top_k,
         where=where,
         include=["documents", "metadatas", "distances"],
     )
 
 
-def _query_collections(client, names: list[str], embedding: list[float], where: dict) -> dict[str, dict]:
+def _query_collections(
+    client,
+    names: list[str],
+    embedding: list[float],
+    where: dict,
+    top_k: int,
+) -> dict[str, dict]:
     if not names:
         return {}
     if len(names) == 1:
-        return {names[0]: _query_one(client, names[0], embedding, where)}
+        return {names[0]: _query_one(client, names[0], embedding, where, top_k)}
     out: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=len(names)) as pool:
         futures = {
-            pool.submit(_query_one, client, name, embedding, where): name
+            pool.submit(_query_one, client, name, embedding, where, top_k): name
             for name in names
         }
         for future, name in futures.items():
             out[name] = future.result()
     return out
+
+
+def retrieve_user_vectors(
+    query: str,
+    user_id: int,
+    collections: tuple[str, ...] = (_HISTORY_COLLECTION, _SUMMARY_COLLECTION),
+    top_k: int = _TOP_K,
+) -> list[NodeWithScore]:
+    """
+    按 user_id 字符串过滤，在指定 collection 上做向量检索。
+    搜索接口与跨会话召回共用这一份；集合不存在或没有命中时返回空列表。
+    """
+    model = init_embedding_model()
+    client = init_chroma_client()
+    embedding = model.get_query_embedding(query)
+    where = {"user_id": str(user_id)}
+    names = _collection_names(client)
+    targets = [name for name in collections if name in names]
+    if not targets:
+        return []
+    queried = _query_collections(client, targets, embedding, where, top_k)
+    candidates: list[NodeWithScore] = []
+    cursor = 0
+    for name in targets:
+        level = "message" if name == _HISTORY_COLLECTION else "session"
+        batch = _nodes_from_query(level, queried[name], cursor)
+        cursor += len(batch)
+        candidates.extend(batch)
+    return candidates
 
 
 def _nodes_from_query(level: str, result: dict, start: int) -> list[NodeWithScore]:
@@ -186,25 +221,7 @@ def search_sessions(query: str, user_id: Optional[int]) -> dict:
     if user_id is None:
         return {"items": [], "reply": _EMPTY_REPLY}
 
-    model = init_embedding_model()
-    client = init_chroma_client()
-    embedding = model.get_query_embedding(query)
-    where = {"user_id": str(user_id)}
-
-    names = _collection_names(client)
-    targets = [name for name in (_HISTORY_COLLECTION, _SUMMARY_COLLECTION) if name in names]
-    if not targets:
-        return {"items": [], "reply": _EMPTY_REPLY}
-
-    queried = _query_collections(client, targets, embedding, where)
-    candidates: list[NodeWithScore] = []
-    cursor = 0
-    for name in targets:
-        level = "message" if name == _HISTORY_COLLECTION else "session"
-        batch = _nodes_from_query(level, queried[name], cursor)
-        cursor += len(batch)
-        candidates.extend(batch)
-
+    candidates = retrieve_user_vectors(query, user_id)
     if not candidates:
         return {"items": [], "reply": _EMPTY_REPLY}
 
