@@ -36,6 +36,7 @@ from xncagent.rdbms.session_repo import (
 )
 from xncagent.utils.exceptions import UnauthorizedException
 from xncagent.config import system_config
+from xncagent.agent.user_turn import TURN_BUSY_REPLY, acquire_user_turn, release_user_turn
 
 
 # 模块级：持有后台任务引用，防止被 GC 提前回收（asyncio 经典坑）
@@ -339,6 +340,36 @@ def _remember(prepared: dict, answer: str, title: Optional[str]) -> None:
     _fire_and_forget(_persist_and_embed(prepared, answer))
 
 
+def _persist_interrupted(prepared: dict, answer: str, title: Optional[str]) -> None:
+    """客户端断开时同步落库已生成的部分。只记 INFO，不把断连当成错误。"""
+    session_id = prepared.get("session_id")
+    user_id = prepared.get("user_id")
+    if user_id is None or session_id is None:
+        return
+    try:
+        user_msg_id, assistant_msg_id = create_messages_batch(
+            session_id,
+            user_id,
+            prepared["query"],
+            answer,
+            prepared["scene"],
+            prepared["rewritten_query"],
+            prepared["degraded"],
+            prepared["emotion_alert"],
+            interrupted=True,
+        )
+    except Exception as exc:
+        logger.info(f"[turn] 客户端断开，部分回复落库失败 session_id={session_id} error={exc}")
+        return
+    logger.info(
+        f"[turn] 客户端断开，已保存部分回复 session_id={session_id} "
+        f"user_msg_id={user_msg_id} assistant_msg_id={assistant_msg_id} "
+        f"chars={len(answer)} interrupted=true"
+    )
+    if not (title or "").strip():
+        _title_save(prepared, answer)
+
+
 def _fire_and_forget(coro: Coroutine[Any, Any, None]) -> None:
     """
     把 coro 扔进后台队列，不阻塞主流程。
@@ -480,6 +511,22 @@ def _sse(data: dict | str) -> str:
         return f"data: {data}\n\n"
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+
+def _busy_payload(session_id: Optional[int]) -> dict:
+    return {
+        "answer": TURN_BUSY_REPLY,
+        "rewritten_query": "",
+        "scene": "",
+        "emotion_alert": False,
+        "confidence": 0.0,
+        "degraded": False,
+        "session_id": session_id,
+    }
+
+
+def _log_turn_rejected(user_id: int) -> None:
+    logger.info(f"[turn] user_id={user_id} 上一轮未结束，拒绝本轮")
+
 async def _check_user_id() -> str:
     """
         为空的几种情况:
@@ -515,18 +562,25 @@ async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
     场景是「无关闲聊」时跳过检索。bge 也失败才返回兜底话术。
     """
     user_id = await _check_user_id()
-    session_id, title = _ensure_session(session_id, user_id)
-    prepared = _prepare_turn(query, session_id, user_id)
-    prepared["user_id"] = user_id
-    if prepared["early"]:
-        # llm和本地调用都失败,走兜底话术,并且保存消息
-        _remember(prepared, prepared["answer"], title)
-        return _payload(session_id, prepared, prepared["answer"])
+    # 匿名在 _check_user_id 里已经拒绝。这里 user_id 必有值，占用失败立即回固定话术。
+    if not await acquire_user_turn(user_id):
+        _log_turn_rejected(user_id)
+        return _busy_payload(session_id)
+    try:
+        session_id, title = _ensure_session(session_id, user_id)
+        prepared = _prepare_turn(query, session_id, user_id)
+        prepared["user_id"] = user_id
+        if prepared["early"]:
+            # llm和本地调用都失败,走兜底话术,并且保存消息
+            _remember(prepared, prepared["answer"], title)
+            return _payload(session_id, prepared, prepared["answer"])
 
-    task_result = await task_llm(prepared["messages"])
-    answer = task_result["answer"]
-    _remember(prepared, answer, title)
-    return _payload(session_id, prepared, answer)
+        task_result = await task_llm(prepared["messages"])
+        answer = task_result["answer"]
+        _remember(prepared, answer, title)
+        return _payload(session_id, prepared, answer)
+    finally:
+        release_user_turn(user_id)
 
 
 async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[str]:
@@ -535,27 +589,42 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
 
     """
     user_id = await _check_user_id()
-    session_id, title = _ensure_session(session_id, user_id)
-    prepared = _prepare_turn(query, session_id, user_id)
-    prepared["user_id"] = user_id
-    meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
-    meta.pop("answer")
-    yield _sse(meta)
-
-    if prepared["early"]:
-        # 全部失败,走兜底话术
-        _remember(prepared, prepared["answer"], title)
-        yield _sse({"text": prepared["answer"]})
+    # 匿名在 _check_user_id 里已经拒绝。占用失败不检索、不调模型，直接把固定话术写进流。
+    if not await acquire_user_turn(user_id):
+        _log_turn_rejected(user_id)
+        yield _sse({"text": TURN_BUSY_REPLY})
         yield _sse("[DONE]")
         return
-
-    parts: list[str] = []
     try:
-        async for delta in task_llm_stream(prepared["messages"], temperature=0.5):
-            parts.append(delta)
-            yield _sse({"text": delta})
-        _remember(prepared, "".join(parts), title)
-        yield _sse("[DONE]")
-    except Exception as e:
-        logger.exception("[LLM] 流式生成异常")
-        yield _sse({"error": str(e)})
+        session_id, title = _ensure_session(session_id, user_id)
+        prepared = _prepare_turn(query, session_id, user_id)
+        prepared["user_id"] = user_id
+        meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
+        meta.pop("answer")
+        yield _sse(meta)
+
+        if prepared["early"]:
+            # 全部失败,走兜底话术
+            _remember(prepared, prepared["answer"], title)
+            yield _sse({"text": prepared["answer"]})
+            yield _sse("[DONE]")
+            return
+
+        parts: list[str] = []
+        finished = False
+        try:
+            async for delta in task_llm_stream(prepared["messages"], temperature=0.5):
+                parts.append(delta)
+                yield _sse({"text": delta})
+            finished = True
+            _remember(prepared, "".join(parts), title)
+            yield _sse("[DONE]")
+        except (GeneratorExit, asyncio.CancelledError):
+            if not finished:
+                _persist_interrupted(prepared, "".join(parts), title)
+            raise
+        except Exception as e:
+            logger.exception("[LLM] 流式生成异常")
+            yield _sse({"error": str(e)})
+    finally:
+        release_user_turn(user_id)

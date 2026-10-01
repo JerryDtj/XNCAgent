@@ -13,6 +13,7 @@ def create_messages_batch(
     rewritten_query: str | None = None,
     degraded: bool = False,
     emotion_alert: bool = False,
+    interrupted: bool = False,
 ) -> tuple[int, int]:
     """
     一轮消息一次 INSERT（user + assistant），返回 (user_msg_id, assistant_msg_id)。
@@ -23,15 +24,15 @@ def create_messages_batch(
             """
             INSERT INTO chat_messages
                 (session_id, user_id, role, content,
-                 scene, rewritten_query, degraded, emotion_alert)
+                 scene, rewritten_query, degraded, emotion_alert, interrupted)
             VALUES
-                (%s, %s, 'user',      %s, %s,   %s,   %s,   %s),
-                (%s, %s, 'assistant', %s, NULL, NULL, FALSE, FALSE)
+                (%s, %s, 'user',      %s, %s,   %s,   %s,   %s,   FALSE),
+                (%s, %s, 'assistant', %s, NULL, NULL, FALSE, FALSE, %s)
             RETURNING id, role
             """,
             (
                 session_id, user_id, query, scene, rewritten_query, degraded, emotion_alert,
-                session_id, user_id, answer,
+                session_id, user_id, answer, interrupted,
             ),
         )
         rows = cur.fetchall()
@@ -96,7 +97,7 @@ def list_messages(
 
         cur.execute(
             f"""
-            SELECT id, role, content, created_at
+            SELECT id, role, content, created_at, interrupted
             FROM chat_messages
             WHERE {where_sql}
             ORDER BY created_at DESC, id DESC
@@ -133,7 +134,7 @@ def list_messages_around(
         if before:
             cur.execute(
                 f"""
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, interrupted
                 FROM chat_messages
                 WHERE {where} AND id < %s
                 ORDER BY id DESC
@@ -144,7 +145,7 @@ def list_messages_around(
             older = list(reversed(cur.fetchall()))
         cur.execute(
             f"""
-            SELECT id, role, content, created_at
+            SELECT id, role, content, created_at, interrupted
             FROM chat_messages
             WHERE {where} AND id >= %s
             ORDER BY id ASC

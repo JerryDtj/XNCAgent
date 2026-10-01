@@ -102,6 +102,7 @@ def _message_items(rows) -> list[dict]:
             "role": row["role"],
             "content": row["content"],
             "created_at": row["created_at"],
+            "interrupted": bool(row["interrupted"]),
         }
         for row in rows
     ]
