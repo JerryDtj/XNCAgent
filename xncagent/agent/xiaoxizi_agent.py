@@ -5,24 +5,41 @@ from typing import Any, Coroutine
 
 from xncagent.llm.llm_task import task_llm, task_llm_stream
 from xncagent.llm.query_rewrite import query_rewrite, SCENE_WHITELIST
-from xncagent.rdbms.message_repo import get_history_by_session, create_messages_batch
+from xncagent.rdbms.message_repo import (
+    get_history_by_session,
+    create_messages_batch,
+    list_messages_for_summary,
+)
 from xncagent.scene_matcher import match_scene
 from xncagent.utils.logger import logger
 from xncagent.utils.context import get_user_id
 from xncagent.schemas.query_rewrite import RewriterQuestionResponse
-from xncagent.rag.rag_retriever import retrieve_knowledge, save_user_msg
+from xncagent.rag.rag_retriever import retrieve_knowledge, save_user_msg, save_session_summary
 from xncagent.config.prompts import load_system_prompt
-from xncagent.rdbms.session_repo import get_session, create_session, update_session_title_if_empty, list_sessions
+from xncagent.rdbms.session_repo import (
+    get_session,
+    create_session,
+    update_session_title_if_empty,
+    list_sessions,
+    get_session_message_count,
+    get_summary_covered_count,
+    upsert_session_summary,
+)
 from xncagent.utils.exceptions import UnauthorizedException
 from xncagent.config import system_config
 
 
 # 模块级：持有后台任务引用，防止被 GC 提前回收（asyncio 经典坑）
 _bg_tasks: set[asyncio.Task] = set()
+_summary_locks: dict[int, asyncio.Lock] = {}
+_summary_locks_guard = asyncio.Lock()
 _TITLE_SYSTEM = (
     "你是会话标题生成器。根据用户的第一句话，输出不超过 12 字的简短标题，"
     "不要引号、不要句号、不要解释，只输出标题本身。"
 )
+_SUMMARY_SYSTEM = "总结这个会话主人和小喜子聊了什么，≤100 字，只输出摘要正文。"
+_SUMMARY_UNCOVERED = 10
+_SUMMARY_MAX_CHARS = 100
 
 
 def _understand(query: str, history: str) -> RewriterQuestionResponse:
@@ -187,10 +204,11 @@ def _title_save(prepared: dict, answer: str) -> None:
 
 def _remember(prepared: dict, answer: str, title: Optional[str]) -> None:
     """
-    一轮结束后，异步做三件事（全部 fire-and-forget，不影响主流程）：
+    一轮结束后，异步做这些事（全部 fire-and-forget，不影响主流程）：
       1. 仅当本会话 title 仍为空时生成标题；失败则保持空，下次再试
       2. 落库 user + assistant 两行
       3. 把这两行 embedding 进 chroma chat_history
+      4. 未覆盖消息数 >= 10 且该轮非降级时，另起任务刷新会话摘要
     2 和 3 有依赖（embedding 要 message_id），放同一个任务里顺序执行。
     """
     if not (title or "").strip():
@@ -205,6 +223,71 @@ def _fire_and_forget(coro: Coroutine[Any, Any, None]) -> None:
     task = asyncio.create_task(coro)
     _bg_tasks.add(task)
     task.add_done_callback(lambda t: _bg_tasks.discard(t))
+
+
+async def _summary_lock(session_id: int) -> asyncio.Lock:
+    async with _summary_locks_guard:
+        lock = _summary_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _summary_locks[session_id] = lock
+        return lock
+
+
+def _schedule_summary_refresh(session_id: int, user_id: int, degraded: bool) -> None:
+    """未覆盖消息数 >= 10 且该轮非降级时，另起任务刷新摘要。检查失败只记日志。"""
+    if degraded:
+        return
+    try:
+        current = get_session_message_count(session_id)
+        covered = get_summary_covered_count(session_id)
+    except Exception:
+        logger.exception(f"[summary] 检查未覆盖消息数失败 session_id={session_id}")
+        return
+    if current - covered < _SUMMARY_UNCOVERED:
+        return
+    _fire_and_forget(_refresh_session_summary(session_id, user_id))
+
+
+async def _refresh_session_summary(session_id: int, user_id: int) -> None:
+    """
+    进 per-session 锁后重查未覆盖数，已被别的任务刷过则跳过。
+    全量重摘，失败只记日志，不抛回调用方。
+    """
+    lock = await _summary_lock(session_id)
+    async with lock:
+        try:
+            current = get_session_message_count(session_id)
+            covered = get_summary_covered_count(session_id)
+            if current - covered < _SUMMARY_UNCOVERED:
+                logger.info(
+                    f"[summary] 跳过 session_id={session_id} "
+                    f"current={current} covered={covered}"
+                )
+                return
+            text, covered_now = list_messages_for_summary(session_id, user_id)
+            if not text.strip():
+                logger.error(f"[summary] 会话没有可摘要的消息 session_id={session_id}")
+                return
+            result = await task_llm(
+                [
+                    {"role": "system", "content": _SUMMARY_SYSTEM},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.3,
+            )
+            summary = (result.get("answer") or "").strip()[:_SUMMARY_MAX_CHARS]
+            if not summary:
+                logger.error(f"[summary] 摘要为空 session_id={session_id}")
+                return
+            await asyncio.to_thread(save_session_summary, session_id, user_id, summary)
+            upsert_session_summary(session_id, user_id, summary, covered_now)
+            logger.info(
+                f"[summary] 已刷新 session_id={session_id} "
+                f"covered={covered_now} summary={summary!r}"
+            )
+        except Exception:
+            logger.exception(f"[summary] 刷新失败 session_id={session_id}")
 
 async def _generate_title(session_id: int, query: str) -> None:
     """
@@ -251,7 +334,10 @@ async def _persist_and_embed(prepared: dict, answer: str) -> None:
     except Exception as e:
         logger.exception(f"[remember] 落库+embedding失败 session_id={session_id}")
         return
-    
+
+    # 摘要刷新独立排队，不挡这条消息的 embedding，也不回主 SSE
+    _schedule_summary_refresh(session_id, user_id, bool(prepared.get("degraded")))
+
     # 如果llm和本地调用都失败进入兜底,那么就没有必要在入chroma
     if not prepared["early"]:
         # 2. embedding：bge 是同步阻塞调用，丢线程池，别堵 event loop
@@ -350,17 +436,3 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
     except Exception as e:
         logger.exception("[LLM] 流式生成异常")
         yield _sse({"error": str(e)})
-
-async def session_list(page: int, page_size: int) -> list[dict]:
-    user_id = await _check_user_id()
-    session_list = list_sessions(user_id, page, page_size)
-    return None
-
-async def update_session_title(id: int, title: str) -> None:
-    await None
-
-async def delete_session_by_id(id: int) -> None:
-    await None
-
-async def list_messages(id: int, page: int, page_size: int) -> list[dict]:
-    return None

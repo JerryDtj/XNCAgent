@@ -107,6 +107,54 @@ def list_messages(
         return cur.fetchall(), total
 
 
+def list_messages_around(
+    session_id: int,
+    user_id: int,
+    around: int,
+    before: int = 2,
+    after: int = 3,
+) -> tuple[list[Row], int]:
+    """
+    以 around 为锚取窗口。
+    id < around 按 id 倒序取 before 条，id >= around 按 id 正序取 after+1 条，合并后按 id 正序。
+    total 仍是该会话消息总数。
+    """
+    before = max(before, 0)
+    after = max(after, 0)
+    where = "session_id = %s AND user_id = %s"
+    scope = (session_id, user_id)
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT COUNT(*) AS cnt FROM chat_messages WHERE {where}",
+            scope,
+        )
+        total = cur.fetchone()["cnt"]
+        older: list[Row] = []
+        if before:
+            cur.execute(
+                f"""
+                SELECT id, role, content, created_at
+                FROM chat_messages
+                WHERE {where} AND id < %s
+                ORDER BY id DESC
+                LIMIT %s
+                """,
+                (*scope, around, before),
+            )
+            older = list(reversed(cur.fetchall()))
+        cur.execute(
+            f"""
+            SELECT id, role, content, created_at
+            FROM chat_messages
+            WHERE {where} AND id >= %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (*scope, around, after + 1),
+        )
+        return older + cur.fetchall(), total
+
+
 def get_history_by_session(
     session_id: int,
     turns: int = 5,
@@ -150,8 +198,11 @@ def get_history_by_session(
 def list_messages_for_summary(
     session_id: int,
     user_id: Optional[int] = None,
-) -> list[Row]:
-    """摘要刷新时用：拿该会话全部消息，正序。"""
+) -> tuple[str, int]:
+    """
+    摘要刷新时用：该会话全部消息，正序。
+    拼成「主人: ...\\n小喜子: ...」，返回 (正文, 覆盖到的消息条数)。
+    """
     where = ["session_id = %s"]
     params: list[Any] = [session_id]
 
@@ -164,14 +215,38 @@ def list_messages_for_summary(
     with get_cursor() as cur:
         cur.execute(
             f"""
-            SELECT id, role, content, created_at
+            SELECT role, content
             FROM chat_messages
             WHERE {where_sql}
             ORDER BY created_at ASC, id ASC
             """,
             params,
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+
+    lines: list[str] = []
+    for row in rows:
+        if row["role"] == "user":
+            lines.append(f"主人: {row['content']}")
+        elif row["role"] == "assistant":
+            lines.append(f"小喜子: {row['content']}")
+    return "\n".join(lines), len(rows)
+
+
+def get_messages_by_ids(message_ids: list[int]) -> dict[int, Row]:
+    """按 message_id 批量取 created_at。"""
+    if not message_ids:
+        return {}
+    with get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, created_at
+            FROM chat_messages
+            WHERE id = ANY(%s)
+            """,
+            (list(message_ids),),
+        )
+        return {row["id"]: row for row in cur.fetchall()}
 
 
 def get_message_count(
