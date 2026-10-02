@@ -8,7 +8,7 @@ reason_templates:
   - "奴才翻出《{title}》，给主子垫一句。"
 
 probability:
-  default: 1.0
+  default: 0.3
 
 # 场景 → 歌曲列表；场景名与 doc/场景定义/ 一致
 # 每首二选一：file（本地，对应 frontend/public/music/ 下的相对路径）
