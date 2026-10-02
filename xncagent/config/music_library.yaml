@@ -1,0 +1,67 @@
+# 场景音乐配置
+# 设计稿：doc/架构/详细设计/20261002-工具插件层与情绪音乐设计稿.md
+# 概率：0~1，全局默认 + 可按场景覆盖；二期接用户画像后动态调整
+# 选中歌曲后从 reason_templates 随机抽一条，{title} 会换成曲名
+reason_templates:
+  - "主子聊到这茬，奴才斗胆配个曲儿——《{title}》"
+  - "这情绪正好，奴才给您按下《{title}》。"
+  - "奴才翻出《{title}》，给主子垫一句。"
+
+probability:
+  default: 1.0
+
+# 场景 → 歌曲列表；场景名与 doc/场景定义/ 一致
+# 每首二选一：file（本地，对应 frontend/public/music/ 下的相对路径）
+#            url（外链，生产用，插件层对两种形态无感知）
+scene_music:
+  职场吐槽:
+    - file: 职场吐槽/331music-lite-rock-funny-morning-cheerful-608879.mp3
+      title: Light Rock Funny Morning
+      artist: 331music
+    - file: 职场吐槽/eliveta-corporate-491206.mp3
+      title: Corporate
+      artist: Eliveta
+    - file: 职场吐槽/iki-eneng-a-musical-joke-k-522-sound.mp3
+      title: A Musical Joke K.522
+      artist: Iki Eneng
+
+  安慰话术:
+    - file: 安慰话术/chopin-nocturne-no-2-in-e-flat-major-op-9-sound.mp3
+      title: Nocturne No.2 in E-flat Major Op.9
+      artist: Chopin
+    - file: 安慰话术/nocturne-in-b-flat-minor-op-9-no-1-sound.mp3
+      title: Nocturne in B-flat Minor Op.9 No.1
+      artist: Chopin
+
+  懒懒不想动:
+    - file: 懒懒不想动/gymnopedie-no-1-for-harp-sound.mp3
+      title: Gymnopedie No.1 (Harp)
+      artist: Satie
+    - file: 懒懒不想动/piano-sonata-no-14-in-c-m-moonlight-op-27-no-2-ii-allegretto-sound.mp3
+      title: Moonlight Sonata II. Allegretto
+      artist: Beethoven
+
+  捧哏金句:
+    - file: 捧哏金句/alex-morgan-comedy-bgm-funny-background-music-583242.mp3
+      title: Comedy BGM
+      artist: Alex Morgan
+    - file: 捧哏金句/paulyudin-comedy-comedy-confetti-481904.mp3
+      title: Comedy Confetti
+      artist: Paulyudin
+    - file: 捧哏金句/paulyudin-upbeat-corporate-corporate-music-595943.mp3
+      title: Upbeat Corporate
+      artist: Paulyudin
+
+  挨骂兜底:
+    - file: 挨骂兜底/hd-studio-forgotten-soul-216812.mp3
+      title: Forgotten Soul
+      artist: HD Studio
+    - file: 挨骂兜底/leberch-documentary-509968.mp3
+      title: Documentary
+      artist: Leberch
+    - file: 挨骂兜底/megisss-corporate-sad-543126.mp3
+      title: Corporate Sad
+      artist: Megisss
+    - file: 挨骂兜底/starostin-comedy-cartoon-funny-background-music-492540.mp3
+      title: Comedy Cartoon
+      artist: Starostin

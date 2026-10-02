@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from xncagent.agent.xiaoxizi_agent import task, task_stream
+from xncagent.agent.xiaoxizi_agent import task_stream
 from xncagent.rdbms.message_repo import list_messages, list_messages_around
 from xncagent.rdbms.session_repo import (
     delete_session,
@@ -11,12 +11,22 @@ from xncagent.rdbms.session_repo import (
     list_sessions,
     update_session_title,
 )
+from xncagent.rdbms.settings_repo import get_settings, update_settings
 from xncagent.schemas.chat_session import ChatSession
 from xncagent.utils.context import get_user_id
+from xncagent.utils.exceptions import UnauthorizedException
 from xncagent.rag.rag_retriever import delete_session_vectors, search_sessions
 
 
 agent_route = APIRouter(prefix="/agent", tags=["agent"])
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+_DEFAULT_SETTINGS = {"music_enabled": True}
 
 
 @agent_route.post("/chat")
@@ -24,7 +34,12 @@ async def chat(
     message: str = Body(embed=True),
     session_id: Optional[int] = Body(None, embed=True),
 ):
-    return await task(message, session_id)
+    # 与 /chat/stream 同为 SSE，便于统一下发 event: meta 音乐帧
+    return StreamingResponse(
+        task_stream(message, session_id),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 @agent_route.post("/chat/stream")
@@ -35,12 +50,32 @@ async def chat_stream(
     return StreamingResponse(
         task_stream(message, session_id),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_SSE_HEADERS,
     )
+
+
+@agent_route.get("/settings")
+def get_settings_api():
+    """读当前用户设置。无行/匿名返回默认 {music_enabled: true}。"""
+    user_id = get_user_id()
+    if user_id is None:
+        return dict(_DEFAULT_SETTINGS)
+    try:
+        row = get_settings(user_id)
+        return {"music_enabled": bool(row["music_enabled"])}
+    except Exception:
+        # 读失败：按默认返回，不阻断设置面板
+        return dict(_DEFAULT_SETTINGS)
+
+
+@agent_route.put("/settings")
+def put_settings_api(music_enabled: bool = Body(embed=True)):
+    """更新 music_enabled（upsert）；匿名 401。"""
+    user_id = get_user_id()
+    if user_id is None:
+        raise UnauthorizedException("用户未登录")
+    row = update_settings(user_id, bool(music_enabled))
+    return {"music_enabled": bool(row["music_enabled"])}
 
 
 def _owned_session(session_id: int) -> tuple[int, ChatSession]:

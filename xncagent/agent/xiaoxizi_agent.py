@@ -1,5 +1,6 @@
 import json
 import asyncio
+import random
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 from typing import Any, Coroutine
@@ -12,6 +13,7 @@ from xncagent.rdbms.message_repo import (
     list_messages_for_summary,
     get_messages_by_ids,
 )
+from xncagent.rdbms.settings_repo import get_settings
 from xncagent.scene_matcher import match_scene
 from xncagent.utils.logger import logger
 from xncagent.utils.context import get_user_id
@@ -37,6 +39,10 @@ from xncagent.rdbms.session_repo import (
 from xncagent.utils.exceptions import UnauthorizedException
 from xncagent.config import system_config
 from xncagent.agent.user_turn import TURN_BUSY_REPLY, acquire_user_turn, release_user_turn
+# 启动时注册 play_music / get_joke
+import xncagent.tools  # noqa: F401
+from xncagent.tools.music_plugin import music_plugin
+from xncagent.tools.registry import get as get_plugin
 
 
 # 模块级：持有后台任务引用，防止被 GC 提前回收（asyncio 经典坑）
@@ -274,6 +280,7 @@ def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] 
                 "degraded": True,
                 "query": query,
                 "session_id": session_id,
+                "music": None,
             }
         rewritten_query = query
         emotion_alert = False
@@ -287,6 +294,12 @@ def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] 
         knowledge_result = ""
 
     memory = _recall_memory(recall_query, user_id, degraded)
+    music = _maybe_play_music(
+        scene=scene,
+        emotion_alert=emotion_alert,
+        user_id=user_id,
+        session_id=session_id,
+    )
     return {
         "early": False,
         "messages": _build_messages(query, history, knowledge_result, emotion_alert, memory),
@@ -297,14 +310,86 @@ def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] 
         "degraded": degraded,
         "query": query,
         "session_id": session_id,
+        "music": music,
     }
+
+
+def _maybe_play_music(
+    scene: str,
+    emotion_alert: bool,
+    user_id: Optional[int],
+    session_id: Optional[int],
+) -> Optional[dict]:
+    """
+    场景音乐触发（生成前，与召回同级）。判断顺序严格按设计稿 §2：
+      1. emotion_alert → 跳过
+      2. scene 未配置音乐（含无关闲聊）→ 跳过
+      3. 概率抽签未中 → 跳过
+      4. user_settings.music_enabled=false → 跳过
+         （匿名按默认 true；查询失败 WARN 并按 true 放行）
+      5. 调 play_music；成功返回 data，失败只记日志
+    任何异常只记日志，绝不阻断主链路。
+    """
+    try:
+        if emotion_alert:
+            logger.info("[music] 跳过：emotion_alert 安全树洞")
+            return None
+        if not music_plugin.scene_configured(scene):
+            logger.info(f"[music] 跳过：场景未配置音乐 scene={scene!r}")
+            return None
+        # 曲库损坏时跳过抽签，直接走后续设置检查 + run，保证失败进日志（验收用例 7）
+        if not music_plugin.load_failed:
+            prob = music_plugin.probability_for(scene)
+            draw = random.random()
+            if draw >= prob:
+                logger.info(
+                    f"[music] 跳过：概率未中 scene={scene!r} "
+                    f"prob={prob} draw={draw:.4f}"
+                )
+                return None
+
+        music_enabled = True
+        if user_id is None:
+            logger.info("[music] 匿名用户，按默认 music_enabled=true")
+        else:
+            try:
+                row = get_settings(user_id)
+                music_enabled = bool(row["music_enabled"])
+            except Exception:
+                logger.warning(
+                    f"[music] 设置查询失败，按默认 true 放行 user_id={user_id}"
+                )
+                music_enabled = True
+        if not music_enabled:
+            logger.info(f"[music] 跳过：用户关闭音乐 user_id={user_id}")
+            return None
+
+        plugin = get_plugin("play_music")
+        if plugin is None:
+            logger.error("[music] play_music 插件未注册")
+            return None
+        result = plugin.run({
+            "scene": scene,
+            "session_key": str(session_id) if session_id is not None else f"u:{user_id}",
+        })
+        if not result.ok:
+            logger.error(f"[music] 插件失败: {result.error}")
+            return None
+        logger.info(
+            f"[music] 命中 scene={scene!r} title={result.data.get('title')!r} "
+            f"url={result.data.get('url')!r}"
+        )
+        return result.data
+    except Exception:
+        logger.exception("[music] 触发链路异常，已忽略")
+        return None
 
 
 def _payload(session_id: int, prepared: dict, answer: str) -> dict:
     """
     失败消息构建
     """
-    return {
+    payload = {
         "answer": answer,
         "rewritten_query": prepared["rewritten_query"],
         "scene": prepared["scene"],
@@ -313,6 +398,7 @@ def _payload(session_id: int, prepared: dict, answer: str) -> dict:
         "degraded": prepared["degraded"],
         "session_id": session_id,
     }
+    return payload
 
 
 def _title_save(prepared: dict, answer: str) -> None:
@@ -506,10 +592,22 @@ async def _persist_and_embed(prepared: dict, answer: str) -> None:
 
     return None
 
-def _sse(data: dict | str) -> str:
+def _sse(data: dict | str, event: Optional[str] = None) -> str:
+    """拼 SSE 帧。event 非空时输出 event: 行（如 meta）；默认事件不写 event 行。"""
     if isinstance(data, str):
-        return f"data: {data}\n\n"
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+        payload = data
+    else:
+        payload = json.dumps(data, ensure_ascii=False)
+    if event:
+        return f"event: {event}\ndata: {payload}\n\n"
+    return f"data: {payload}\n\n"
+
+
+def _sse_music_meta(music: Optional[dict]) -> Optional[str]:
+    """本轮有音乐时返回 meta 帧，否则 None（不发送）。"""
+    if not music:
+        return None
+    return _sse({"music": music}, event="meta")
 
 
 def _busy_payload(session_id: Optional[int]) -> dict:
@@ -602,6 +700,10 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
         meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
         meta.pop("answer")
         yield _sse(meta)
+
+        music_frame = _sse_music_meta(prepared.get("music"))
+        if music_frame:
+            yield music_frame
 
         if prepared["early"]:
             # 全部失败,走兜底话术

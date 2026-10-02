@@ -113,7 +113,10 @@ uv run start
 | GET | `/agent/sessions` | 会话列表（分页 + 摘要 LEFT JOIN；匿名返回空列表） |
 | PATCH / DELETE | `/agent/sessions/{id}` | 会话改名 / 删除（不存在与不属主一律 404，防枚举） |
 | GET | `/agent/sessions/{id}/messages` | 消息分页，支持锚点游标窗口 `around` / `before` / `after` |
+| 方法 | 路径 | 说明 |
+|------|------|------|
 | POST | `/agent/sessions/search` | 语义搜索：`chat_history` 消息级 + `chat_summaries` 摘要级两级并行召回，bge-reranker 精排，同会话去重 top10 |
+| GET / PUT | `/agent/settings` | 用户设置（音乐播放开关，后端 user_settings 表为唯一权威；匿名 GET 返回默认） |
 
 对话以外的接口都需要 `X-User-Id` 才返回数据；消息落库（`chat_sessions` / `chat_messages` / `chat_session_summaries`）与异步嵌入（标题生成、消息/摘要向量）由 `/agent/chat` 链路触发。
 
@@ -131,7 +134,7 @@ XNCAgent/
 │   ├── rdbms/                       # Postgres 仓储（会话/消息/摘要三表）
 │   ├── schemas/                     # pydantic 结构（RewriterQuestionResponse 等）
 │   ├── scene_matcher.py             # bge 场景匹配（交叉校验 + 降级通道）
-│   ├── tools/                       # 内置工具（规划中接入 MCP）
+│   ├── tools/                       # 工具插件层（MCP 语义：play_music 场景音乐 / get_joke）
 │   └── utils/
 ├── doc/                             # 话术、架构演进、详细设计、测试清单
 ├── script/                          # 知识库构建等脚本
