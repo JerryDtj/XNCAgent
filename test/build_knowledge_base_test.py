@@ -8,7 +8,7 @@ import sys
 
 
 ROOT_DIR = Path(__file__).parent.parent
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ.setdefault("HF_ENDPOINT", "https://www.modelscope.cn")
 os.environ["HF_HOME"] = str(ROOT_DIR / "models/models")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sys.path.insert(0, str(ROOT_DIR))

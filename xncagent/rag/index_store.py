@@ -5,7 +5,7 @@ from pathlib import Path
 # 且 Chroma 0.5 在 Windows + Python 3.11 上导入时会栈溢出。
 _PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 os.environ["HF_HOME"] = str(_PROJECT_DIR / "models" / "models")
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ.setdefault("HF_ENDPOINT", "https://www.modelscope.cn")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from xncagent.rag.chromadb_import import disable_overrides_type_hint_check

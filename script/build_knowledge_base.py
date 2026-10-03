@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 os.environ["HF_HOME"] = str(Path(__file__).parent.parent / "models/models")
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ.setdefault("HF_ENDPOINT", "https://www.modelscope.cn")
 os.environ["TOKENZERS_PARALLELISM"] = "false"
 
 from xncagent.config import Config
