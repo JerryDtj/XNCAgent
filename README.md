@@ -143,21 +143,3 @@ XNCAgent/
 ├── pyproject.toml                   # 脚本入口 start = xncagent.__main__:main
 └── uv.lock
 ```
-
-## 推送到 GitHub
-
-本仓库已执行 `git init`。本地文件准备好后，自行提交并推送（请勿提交 `.env`）：
-
-```bash
-git add .
-git commit -m "feat: 初始化 XNCAgent 小喜子 Agent"
-
-# 若远程仓库已存在
-git remote add origin git@github.com:<你的用户名>/XNCAgent.git
-git push -u origin main
-
-# 或用 GitHub CLI 新建远程仓库再推送
-gh repo create XNCAgent --private --source=. --remote=origin --push
-```
-
-若当前默认分支是 `master`，把上面的 `main` 换成 `master` 即可。
