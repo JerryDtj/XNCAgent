@@ -1,2 +1,2 @@
 check_model_name: "deepseek-flash"
-task_model_name: "deepseek-flash"
+task_model_name: "deepseek-v4-flash"

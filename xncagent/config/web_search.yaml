@@ -1,0 +1,8 @@
+web_search:
+  provider: "bocha"          # bocha / tavily
+  count: 8                   # 每轮取回条数，注入上下文约 2~3K token
+  timeout_seconds: 10
+  bocha:
+    base_url: "https://api.bochaai.com/v1/web-search"
+  tavily:
+    base_url: "https://api.tavily.com/search"

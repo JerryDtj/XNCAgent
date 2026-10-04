@@ -1,6 +1,7 @@
 import json
 import asyncio
 import random
+import time
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 from typing import Any, Coroutine
@@ -79,16 +80,43 @@ def _understand(query: str, history: str) -> RewriterQuestionResponse:
 
     return rewrite
 
+def _format_web_results(web_results: list) -> str:
+    """设计 §3.4：标题、摘要、来源。空列表不该走到这里。"""
+    lines = [
+        "# 联网检索资料",
+        "下面是奴才刚上网为主人查到的资料。回答时只依据这些资料说；",
+        "资料没提到的，老实承认不知道，不要编。",
+        "",
+    ]
+    for index, hit in enumerate(web_results, 1):
+        if isinstance(hit, dict):
+            title = hit.get("title") or ""
+            snippet = hit.get("snippet") or ""
+            url = hit.get("url") or ""
+        else:
+            title = getattr(hit, "title", "") or ""
+            snippet = getattr(hit, "snippet", "") or ""
+            url = getattr(hit, "url", "") or ""
+        lines.append(f"{index}. 《{title}》")
+        lines.append(f"   {snippet}")
+        lines.append(f"   来源：{url}")
+    return "\n".join(lines)
+
+
 def _build_messages(
     query: str,
     history: str,
     knowledge: str,
     emotion_alert: bool,
     memory: str = "",
+    web_results: list | None = None,
+    cold_start: bool = False,
+    needs_silence: bool = False,
 ) -> list[dict[str, str]]:
     """
     构建生成消息。话术参考和旧会话记忆附在系统提示词后面，历史和本轮输入放在用户消息里。
-    安全树洞放在记忆之后，优先级高于记忆内容。
+    块顺序：话术参考、联网资料、旧会话记忆、劝谏、树洞、冷启动。
+    劝谏与树洞同轮只注入树洞。冷启动标记放在所有附加块的最后。
     """
     system = load_system_prompt("xiaoxizi_system")
     if knowledge:
@@ -98,6 +126,8 @@ def _build_messages(
             "不要逐字复读，也不要提及知识库。\n"
             f"{knowledge}"
         )
+    if web_results:
+        system += "\n\n" + _format_web_results(web_results)
     if memory:
         system += (
             "\n\n# 旧会话记忆\n"
@@ -105,11 +135,23 @@ def _build_messages(
             "没写到的事不要编，老实说不记得。\n"
             f"{memory}"
         )
-    if emotion_alert:
+    # 两者皆真只注入树洞：主人明确要安静就安静，不再劝。
+    if needs_silence:
         system += (
             "\n\n# 本轮安全树洞\n"
-            "这一轮情绪预警已触发。立刻停掉玩笑：说奴才把嘴闭上了，"
-            "递上虚拟纸巾，安静陪着，不要接梗。"
+            "奴才之前的表演一直没接住主人的情绪。只做三件事："
+            "说奴才把嘴闭上了、递上虚拟纸巾、安静陪着直到主人重新开口。不要劝，不要问。"
+        )
+    elif emotion_alert:
+        system += (
+            "\n\n# 本轮劝谏\n"
+            "主人表达了重度痛苦。收起全部玩笑，认真温和地劝：先接住情绪，再劝主人"
+            "找信得过的真人诉说，必要时寻求专业帮助。可以问主子愿意多说说吗。"
+        )
+    if cold_start:
+        system += (
+            "\n\n# 本轮冷启动\n"
+            "这是本会话的第一轮。按规则 5 输出开场白（整场只允许这一次）。"
         )
     user_content = query
     if history:
@@ -241,7 +283,66 @@ def _recall_memory(recall_query: str, user_id: Optional[int], degraded: bool) ->
     return block
 
 
-def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] = None) -> dict:
+def _is_cold_start(session_id: Optional[int]) -> bool:
+    """第一轮生成前消息还没落库，计数为 0。查数失败按非冷启动，不阻断。"""
+    if session_id is None:
+        return False
+    try:
+        return get_session_message_count(session_id) == 0
+    except Exception as exc:
+        logger.warning(f"[cold_start] 查询消息数失败 session_id={session_id} error={exc}")
+        return False
+
+
+def _log_web_search_skipped(query: str, provider: str, scene: str, needs: bool) -> None:
+    logger.info(
+        f"[web_search] 判定 query={query} needs={str(needs).lower()} scene={scene} "
+        f"provider={provider} hits=0 cost_ms=0"
+    )
+
+
+def _web_failure_is_config(error: str) -> bool:
+    text = error or ""
+    return "未配置" in text or "未注册" in text or "未知 provider" in text
+
+
+async def _search_web(query: str, scene: str) -> list[dict]:
+    """原始 query 调插件。超时、空结果、缺 key 都只记日志，返回空列表。"""
+    plugin = get_plugin("web_search")
+    provider = getattr(plugin, "provider_name", "unknown") if plugin else "unknown"
+    if plugin is None:
+        logger.error(f"[web_search] 失败 query={query} error=插件未注册")
+        return []
+    try:
+        count = int(getattr(plugin, "count", 8) or 8)
+    except (TypeError, ValueError):
+        count = 8
+    started = time.perf_counter()
+    try:
+        result = await asyncio.to_thread(plugin.run, {"query": query, "count": count})
+    except Exception as exc:
+        logger.warning(f"[web_search] 失败 query={query} error={exc}")
+        return []
+    cost_ms = int((time.perf_counter() - started) * 1000)
+    if result is None or not getattr(result, "ok", False):
+        err = getattr(result, "error", "") or "搜索失败"
+        line = f"[web_search] 失败 query={query} error={err}"
+        if _web_failure_is_config(err):
+            logger.error(line)
+        else:
+            logger.warning(line)
+        return []
+    hits = (getattr(result, "data", None) or {}).get("hits") or []
+    if not isinstance(hits, list):
+        hits = []
+    logger.info(
+        f"[web_search] 判定 query={query} needs=true scene={scene} "
+        f"provider={provider} hits={len(hits)} cost_ms={cost_ms}"
+    )
+    return hits
+
+
+async def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] = None) -> dict:
     """
     预检、理解、检索，拼好生成消息。
     历史记录由原有的预检修改为合法请求都附带
@@ -256,14 +357,16 @@ def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] 
     # 定义是否走降级通道标志
     degraded = False
     recall_query = ""
+    check_result: Optional[RewriterQuestionResponse] = None
     try:
         # 开始走llm改写用户问题
-        check_result: RewriterQuestionResponse = _understand(query, history)
+        check_result = _understand(query, history)
         rewritten_query = check_result.rewritten_query
         scene = check_result.scene
         emotion_alert = check_result.emotion_alert
         confidence = check_result.confidence
         recall_query = (check_result.recall_query or "").strip()
+        needs_silence = bool(check_result.needs_silence)
     except Exception as e:
         logger.error(f"LLM 统一调用失败，降级为本地场景匹配: {e}")
         try:
@@ -284,6 +387,7 @@ def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] 
             }
         rewritten_query = query
         emotion_alert = False
+        needs_silence = False
         confidence = score
         degraded = True
 
@@ -300,9 +404,39 @@ def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional[int] 
         user_id=user_id,
         session_id=session_id,
     )
+    # 降级、劝谏、树洞都不打外部搜索。树洞优先于劝谏。
+    if needs_silence:
+        logger.info(
+            f"[needs_silence] 判定 query={query} needs=true scene={scene} "
+            f"emotion_alert={str(emotion_alert).lower()}"
+        )
+    if degraded or check_result is None:
+        logger.info(f"[web_search] 跳过 query={query} reason=degraded")
+        web_results: list[dict] = []
+    elif needs_silence or emotion_alert:
+        reason = "needs_silence" if needs_silence else "emotion_alert"
+        logger.info(f"[web_search] 跳过 query={query} reason={reason}")
+        web_results = []
+    elif check_result.needs_web_search:
+        web_results = await _search_web(query, scene)
+    else:
+        plugin = get_plugin("web_search")
+        provider = getattr(plugin, "provider_name", "unknown") if plugin else "unknown"
+        _log_web_search_skipped(query, provider, scene, False)
+        web_results = []
+    cold_start = _is_cold_start(session_id)
     return {
         "early": False,
-        "messages": _build_messages(query, history, knowledge_result, emotion_alert, memory),
+        "messages": _build_messages(
+            query,
+            history,
+            knowledge_result,
+            emotion_alert,
+            memory,
+            web_results,
+            cold_start,
+            needs_silence,
+        ),
         "rewritten_query": rewritten_query,
         "scene": scene,
         "emotion_alert": emotion_alert,
@@ -666,7 +800,7 @@ async def task(query: str, session_id: Optional[int]) -> Optional[dict]:
         return _busy_payload(session_id)
     try:
         session_id, title = _ensure_session(session_id, user_id)
-        prepared = _prepare_turn(query, session_id, user_id)
+        prepared = await _prepare_turn(query, session_id, user_id)
         prepared["user_id"] = user_id
         if prepared["early"]:
             # llm和本地调用都失败,走兜底话术,并且保存消息
@@ -695,7 +829,7 @@ async def task_stream(query: str, session_id: Optional[int]) -> AsyncIterator[st
         return
     try:
         session_id, title = _ensure_session(session_id, user_id)
-        prepared = _prepare_turn(query, session_id, user_id)
+        prepared = await _prepare_turn(query, session_id, user_id)
         prepared["user_id"] = user_id
         meta = _payload(session_id, prepared, prepared["answer"] if prepared["early"] else "")
         meta.pop("answer")
