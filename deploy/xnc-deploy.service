@@ -1,0 +1,12 @@
+[Unit]
+Description=XNCAgent auto deploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/xnc/deploy/deploy.sh
+# npm install + build 可能超过默认 90 秒，超时会被 systemd 杀掉并留下半成品软链。
+TimeoutStartSec=1800
+# 可选。文件不存在时忽略。格式：WEBHOOK_URL=https://example/hook
+EnvironmentFile=-/opt/xnc/deploy/env

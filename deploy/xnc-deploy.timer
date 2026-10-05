@@ -1,0 +1,13 @@
+[Unit]
+Description=XNCAgent auto deploy timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=xnc-deploy.service
+# 默认 AccuracySec=1min，5 分钟轮询会被再拖大约一分钟。
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
