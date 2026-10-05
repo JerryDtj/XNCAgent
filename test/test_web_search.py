@@ -119,10 +119,13 @@ def test_understand_prompt_states_web_search_rules():
     assert "时效性信息" in text
     assert "五场景话术类输入" in text
     assert "recall_query，不搜索" in text
+    assert "指涉对象未知" in text
+    assert "rewritten_query 同时也是本轮联网搜索实际使用的查询词" in text
     assert '"needs_web_search": false' in text
+    assert '"needs_silence": false' in text
 
 
-def test_case1_proper_noun_searches_original_query_and_injects_hits(monkeypatch):
+def test_case1_proper_noun_searches_rewritten_query_and_injects_hits(monkeypatch):
     spy = SearchSpy(
         PluginResult(
             ok=True,
@@ -144,7 +147,7 @@ def test_case1_proper_noun_searches_original_query_and_injects_hits(monkeypatch)
     _install(monkeypatch, understand, spy)
     prepared = _turn("你知道奶绿波吗")
     assert prepared["degraded"] is False
-    assert spy.calls == [{"query": "你知道奶绿波吗", "count": 8}]
+    assert spy.calls == [{"query": "奶绿波是什么", "count": 8}]
     system = prepared["messages"][0]["content"]
     assert _INJECTED_WEB in system
     assert "《奶绿波》" in system
@@ -175,7 +178,7 @@ def test_case3_timely_news_searches(monkeypatch):
     )
 
     def understand(query, history):
-        return _rewrite(scene="无关闲聊", needs_web_search=True)
+        return _rewrite(scene="无关闲聊", needs_web_search=True, rewritten_query="今天有什么新闻")
 
     _install(monkeypatch, understand, spy)
     prepared = _turn("今天有什么新闻")

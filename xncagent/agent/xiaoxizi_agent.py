@@ -418,7 +418,9 @@ async def _prepare_turn(query: str, session_id: Optional[int], user_id: Optional
         logger.info(f"[web_search] 跳过 query={query} reason={reason}")
         web_results = []
     elif check_result.needs_web_search:
-        web_results = await _search_web(query, scene)
+        # 用改写后的自包含查询搜索：指代已补全，不拿原始句直接搜
+        search_query = getattr(check_result, "rewritten_query", None) or query
+        web_results = await _search_web(search_query, scene)
     else:
         plugin = get_plugin("web_search")
         provider = getattr(plugin, "provider_name", "unknown") if plugin else "unknown"
