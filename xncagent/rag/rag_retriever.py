@@ -1,7 +1,13 @@
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
+
+import torch
+
+# 必须在任何推理之前设好。intra-op 线程按核数封顶，避免重排时打满所有核。
+torch.set_num_threads(os.cpu_count() or 1)
 
 from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.core.vector_stores.types import FilterOperator, MetadataFilter, MetadataFilters
@@ -18,6 +24,8 @@ _RERANKER_MODEL = "BAAI/bge-reranker-base"
 _RERANKER_TOP_N = 1000
 _reranker: Optional[FlagEmbeddingReranker] = None
 _reranker_lock = threading.Lock()
+# 单例权重不是线程安全的，推理同时只允许一路。
+_rerank_gate = threading.Semaphore(1)
 
 
 def get_reranker() -> FlagEmbeddingReranker:
@@ -51,7 +59,8 @@ def retrieve_knowledge(query: str, scene: str) -> str:
         return ""
 
     # 开始对指定结果再次排序。单例不截断，这里仍只留 top 3。
-    nodes = get_reranker().postprocess_nodes(nodes, query_str=query)[:3]
+    with _rerank_gate:
+        nodes = get_reranker().postprocess_nodes(nodes, query_str=query)[:3]
     logger.info(f"场景 [{scene}] 检索到的top_3的数据为: {nodes}")
     return "/n/n".join([node.text.strip() for node in nodes if node.text.strip()])
 
@@ -244,7 +253,8 @@ def search_sessions(query: str, user_id: Optional[int]) -> dict:
         return {"items": [], "reply": _EMPTY_REPLY}
 
     # 原 top_n=len(candidates)：重排后候选一条不丢，后面再按会话去重取 _RESULT_LIMIT。
-    ranked = get_reranker().postprocess_nodes(candidates, query_str=query)[: len(candidates)]
+    with _rerank_gate:
+        ranked = get_reranker().postprocess_nodes(candidates, query_str=query)[: len(candidates)]
 
     best: dict[int, tuple[float, NodeWithScore]] = {}
     for item in ranked:
