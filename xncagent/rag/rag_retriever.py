@@ -1,6 +1,7 @@
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
@@ -127,9 +128,10 @@ def save_session_summary(session_id: int, user_id: int, summary: str) -> None:
     )
 
 
-_TOP_K = 20
+_TOP_K = 10
 _RESULT_LIMIT = 10
 _SNIPPET_LEN = 80
+_RERANK_TEXT_CHARS = 256
 _MIN_RERANK_SCORE = 0.0
 
 
@@ -186,23 +188,46 @@ def retrieve_user_vectors(
     按 user_id 字符串过滤，在指定 collection 上做向量检索。
     搜索接口与跨会话召回共用这一份；集合不存在或没有命中时返回空列表。
     """
+    nodes, _, _ = _retrieve_user_vectors(query, user_id, collections, top_k)
+    return nodes
+
+
+def _retrieve_user_vectors(
+    query: str,
+    user_id: int,
+    collections: tuple[str, ...],
+    top_k: int,
+) -> tuple[list[NodeWithScore], float, float]:
+    """返回 (候选, embed 毫秒, chroma 毫秒)。embed 只含查询向量，chroma 含查库和拼节点。"""
     model = init_embedding_model()
     client = init_chroma_client()
+    t0 = time.perf_counter()
     embedding = model.get_query_embedding(query)
+    embed_ms = (time.perf_counter() - t0) * 1000
+
+    t1 = time.perf_counter()
     where = {"user_id": str(user_id)}
     names = _collection_names(client)
     targets = [name for name in collections if name in names]
-    if not targets:
-        return []
-    queried = _query_collections(client, targets, embedding, where, top_k)
     candidates: list[NodeWithScore] = []
-    cursor = 0
-    for name in targets:
-        level = "message" if name == _HISTORY_COLLECTION else "session"
-        batch = _nodes_from_query(level, queried[name], cursor)
-        cursor += len(batch)
-        candidates.extend(batch)
-    return candidates
+    if targets:
+        queried = _query_collections(client, targets, embedding, where, top_k)
+        cursor = 0
+        for name in targets:
+            level = "message" if name == _HISTORY_COLLECTION else "session"
+            batch = _nodes_from_query(level, queried[name], cursor)
+            cursor += len(batch)
+            candidates.extend(batch)
+    chroma_ms = (time.perf_counter() - t1) * 1000
+    return candidates, embed_ms, chroma_ms
+
+
+def _truncate_for_rerank(nodes: list[NodeWithScore]) -> None:
+    """重排只看正文前 256 字。snippet 仍取前 80 字，落在这段里面。"""
+    for item in nodes:
+        text = item.node.text or ""
+        if len(text) > _RERANK_TEXT_CHARS:
+            item.node.text = text[:_RERANK_TEXT_CHARS]
 
 
 def _nodes_from_query(level: str, result: dict, start: int) -> list[NodeWithScore]:
@@ -248,13 +273,22 @@ def search_sessions(query: str, user_id: Optional[int]) -> dict:
     if user_id is None:
         return {"items": [], "reply": _EMPTY_REPLY}
 
-    candidates = retrieve_user_vectors(query, user_id)
+    candidates, embed_ms, chroma_ms = _retrieve_user_vectors(
+        query, user_id, (_HISTORY_COLLECTION, _SUMMARY_COLLECTION), _TOP_K,
+    )
     if not candidates:
+        logger.info(
+            f"[search] user_id={user_id} candidates=0 items=0 "
+            f"embed_ms={embed_ms:.0f} chroma_ms={chroma_ms:.0f} rerank_ms=0 pg_ms=0"
+        )
         return {"items": [], "reply": _EMPTY_REPLY}
 
     # 原 top_n=len(candidates)：重排后候选一条不丢，后面再按会话去重取 _RESULT_LIMIT。
+    t_rerank = time.perf_counter()
+    _truncate_for_rerank(candidates)
     with _rerank_gate:
         ranked = get_reranker().postprocess_nodes(candidates, query_str=query)[: len(candidates)]
+    rerank_ms = (time.perf_counter() - t_rerank) * 1000
 
     best: dict[int, tuple[float, NodeWithScore]] = {}
     for item in ranked:
@@ -273,8 +307,10 @@ def search_sessions(query: str, user_id: Optional[int]) -> dict:
         for _, item in ordered
         if item.node.id_.startswith("message:") and item.node.metadata.get("message_id") is not None
     ]
+    t_pg = time.perf_counter()
     sessions = get_sessions_by_ids(session_ids)
     messages = get_messages_by_ids(message_ids)
+    pg_ms = (time.perf_counter() - t_pg) * 1000
 
     items = []
     for _, item in ordered:
@@ -299,6 +335,11 @@ def search_sessions(query: str, user_id: Optional[int]) -> dict:
             "created_at": _iso(created_at),
         })
 
+    logger.info(
+        f"[search] user_id={user_id} candidates={len(candidates)} items={len(items)} "
+        f"embed_ms={embed_ms:.0f} chroma_ms={chroma_ms:.0f} "
+        f"rerank_ms={rerank_ms:.0f} pg_ms={pg_ms:.0f}"
+    )
     if not items:
         return {"items": [], "reply": _EMPTY_REPLY}
     return {"items": items}
