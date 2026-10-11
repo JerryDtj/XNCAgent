@@ -6,13 +6,28 @@ from fastapi import FastAPI
 from xncagent.request_test import router as test_router
 from xncagent.route.agent_route import agent_route
 from xncagent.utils.exception_handle import register_exception_handler
-from xncagent.utils.logger import suppress_noisy_access_logs
+from xncagent.utils.logger import logger, suppress_noisy_access_logs
 from xncagent.utils.middleware import request_id_middleware
 from xncagent.rdbms.postgres import init_pool, close_pool
+
+
+def _warmup_models() -> None:
+    """启动时加载嵌入模型、Chroma 和场景矩阵。失败只记日志，不阻断启动。"""
+    try:
+        from xncagent.rag.index_store import init_chroma_client, init_embedding_model
+        from xncagent.scene_matcher import _scene_matrix
+
+        init_embedding_model()
+        init_chroma_client()
+        _scene_matrix()
+    except Exception:
+        logger.exception("嵌入模型 / Chroma / 场景矩阵预热失败，启动继续，首次请求将懒加载")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_pool()
+    _warmup_models()
     yield
     close_pool()
 

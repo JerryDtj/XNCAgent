@@ -10,6 +10,7 @@
 #
 # 注意：描述口径以 doc/场景定义/ 为权威来源，scene_desc.yaml 是其机器可消费版。
 
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -19,7 +20,8 @@ import yaml
 from xncagent.utils.logger import logger
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "scene_desc.yaml"
-_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
+_model = None
+_model_lock = threading.Lock()
 
 
 @lru_cache(maxsize=1)
@@ -32,13 +34,17 @@ def _load_config() -> dict:
     }
 
 
-@lru_cache(maxsize=1)
 def _load_model():
-    from sentence_transformers import SentenceTransformer
+    """复用 index_store 里那一份 SentenceTransformer，双检锁只缓存引用。"""
+    global _model
+    if _model is None:
+        with _model_lock:
+            if _model is None:
+                from xncagent.rag.index_store import get_sentence_transformer
 
-    model = SentenceTransformer(_MODEL_NAME, device="cpu")
-    logger.info(f"场景匹配模型加载完成: {_MODEL_NAME}")
-    return model
+                _model = get_sentence_transformer()
+                logger.info("场景匹配复用嵌入模型")
+    return _model
 
 
 # 场景定义目录：判定规则的权威来源（供 LLM prompt 与评测集出题，不进向量原型）
