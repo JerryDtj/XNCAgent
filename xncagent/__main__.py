@@ -12,16 +12,18 @@ from xncagent.rdbms.postgres import init_pool, close_pool
 
 
 def _warmup_models() -> None:
-    """启动时加载嵌入模型、Chroma 和场景矩阵。失败只记日志，不阻断启动。"""
+    """启动时加载嵌入模型、Chroma、场景矩阵和重排模型。失败只记日志，不阻断启动。"""
     try:
         from xncagent.rag.index_store import init_chroma_client, init_embedding_model
+        from xncagent.rag.rag_retriever import get_reranker
         from xncagent.scene_matcher import _scene_matrix
 
         init_embedding_model()
         init_chroma_client()
         _scene_matrix()
+        get_reranker()
     except Exception:
-        logger.exception("嵌入模型 / Chroma / 场景矩阵预热失败，启动继续，首次请求将懒加载")
+        logger.exception("嵌入模型 / Chroma / 场景矩阵 / 重排模型预热失败，启动继续，首次请求将懒加载")
 
 
 @asynccontextmanager

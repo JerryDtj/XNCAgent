@@ -1,4 +1,5 @@
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
@@ -10,6 +11,27 @@ from xncagent.rag.index_store import get_index, init_chroma_client, init_embeddi
 from xncagent.rdbms.message_repo import get_messages_by_ids
 from xncagent.rdbms.session_repo import get_sessions_by_ids
 from xncagent.utils.logger import logger
+
+_RERANKER_MODEL = "BAAI/bge-reranker-base"
+# postprocess_nodes 用实例上的 top_n 截断。两处调用截断数不同，
+# 单例设得比任一请求的候选数都大，真正的条数由调用方切片决定。
+_RERANKER_TOP_N = 1000
+_reranker: Optional[FlagEmbeddingReranker] = None
+_reranker_lock = threading.Lock()
+
+
+def get_reranker() -> FlagEmbeddingReranker:
+    """双检锁：并发请求只加载一份 bge-reranker。"""
+    global _reranker
+    if _reranker is None:
+        with _reranker_lock:
+            if _reranker is None:
+                _reranker = FlagEmbeddingReranker(
+                    model=_RERANKER_MODEL,
+                    top_n=_RERANKER_TOP_N,
+                )
+                logger.info(f"重排模型初始化完成: {_RERANKER_MODEL}")
+    return _reranker
 
 
 def retrieve_knowledge(query: str, scene: str) -> str:
@@ -28,12 +50,8 @@ def retrieve_knowledge(query: str, scene: str) -> str:
         logger.info(f"没有检索到相关内容")
         return ""
 
-    # 开始对指定结果再次排序
-    reranker = FlagEmbeddingReranker(
-        model="BAAI/bge-reranker-base",
-        top_n=3,
-    )
-    nodes = reranker.postprocess_nodes(nodes, query_str=query)
+    # 开始对指定结果再次排序。单例不截断，这里仍只留 top 3。
+    nodes = get_reranker().postprocess_nodes(nodes, query_str=query)[:3]
     logger.info(f"场景 [{scene}] 检索到的top_3的数据为: {nodes}")
     return "/n/n".join([node.text.strip() for node in nodes if node.text.strip()])
 
@@ -225,11 +243,8 @@ def search_sessions(query: str, user_id: Optional[int]) -> dict:
     if not candidates:
         return {"items": [], "reply": _EMPTY_REPLY}
 
-    reranker = FlagEmbeddingReranker(
-        model="BAAI/bge-reranker-base",
-        top_n=len(candidates),
-    )
-    ranked = reranker.postprocess_nodes(candidates, query_str=query)
+    # 原 top_n=len(candidates)：重排后候选一条不丢，后面再按会话去重取 _RESULT_LIMIT。
+    ranked = get_reranker().postprocess_nodes(candidates, query_str=query)[: len(candidates)]
 
     best: dict[int, tuple[float, NodeWithScore]] = {}
     for item in ranked:
